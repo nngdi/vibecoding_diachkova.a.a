@@ -7,6 +7,7 @@ Lab: Lab2 — Подключение бота к данным
   
 
 # Лабораторная работа 2. Подключение Telegram-бота к данным
+Видео https://drive.google.com/file/d/1ML6exItmq_qVDEkao-w4eOz784cwpzwC/view?usp=drivesdk
 
 ## 1. Описание интеграции
 
