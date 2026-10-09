@@ -1,2 +1,0 @@
-python-telegram-bot[job-queue]>=22.8,<23
-nest_asyncio>=1.6,<2
