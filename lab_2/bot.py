@@ -1,5 +1,5 @@
 import os
-import json
+import sqlite3
 import nest_asyncio
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -15,173 +15,276 @@ from telegram.ext import (
 
 nest_asyncio.apply()
 
-TOKEN = os.environ.get("BOT_TOKEN")
-TIMEZONE = ZoneInfo("Europe/Moscow")
-DATA_FILE = "study_planner.json"
+TOKEN = os.environ["BOT_TOKEN"]
+DB_FILE = "planner.db"
 
-PRIORITY_NAMES = {1: "🔴 Высокая", 2: "🟡 Средняя", 3: "🟢 Низкая"}
-WEEKDAY_NAMES = {
-    0: "Понедельник", 1: "Вторник", 2: "Среда", 3: "Четверг",
-    4: "Пятница", 5: "Суббота", 6: "Воскресенье"
+MOSCOW = ZoneInfo("Europe/Moscow")
+BEIJING = ZoneInfo("Asia/Shanghai")
+
+PRIORITY_NAMES = {
+    1: "🔴 Высокая",
+    2: "🟡 Средняя",
+    3: "🟢 Низкая",
 }
-WEEKDAY_SHORT = {0:"Пн",1:"Вт",2:"Ср",3:"Чт",4:"Пт",5:"Сб",6:"Вс"}
+
+LESSON_TYPES = {
+    "lecture": "📖 Лекция",
+    "practice": "✏️ Практика",
+}
+
+WEEKDAY_NAMES = {
+    0: "Понедельник", 1: "Вторник", 2: "Среда",
+    3: "Четверг", 4: "Пятница", 5: "Суббота",
+    6: "Воскресенье",
+}
 
 MAIN_MENU = ReplyKeyboardMarkup(
     [
         ["➕ Добавить задачу", "📅 Сегодня"],
         ["🗓 Неделя", "📚 Расписание"],
         ["📋 Все задачи", "➕ Добавить занятие"],
+        ["📊 Статистика", "🕘 История"],
     ],
     resize_keyboard=True,
     is_persistent=True,
 )
 
+# -------------------- SQLite --------------------
 
-def load_data():
+def connect():
+    conn = sqlite3.connect(DB_FILE)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+def init_db():
+    with connect() as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS tasks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                text TEXT NOT NULL,
+                due_datetime TEXT NOT NULL,
+                priority INTEGER NOT NULL,
+                done INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                completed_at TEXT
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS lessons (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                name TEXT NOT NULL,
+                lesson_type TEXT NOT NULL,
+                weekday INTEGER NOT NULL,
+                start_time TEXT NOT NULL,
+                end_time TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+        """)
+        conn.commit()
+
+def add_task(user_id, text, due, priority):
+    with connect() as conn:
+        cur = conn.execute("""
+            INSERT INTO tasks
+            (user_id, text, due_datetime, priority, done, created_at)
+            VALUES (?, ?, ?, ?, 0, ?)
+        """, (user_id, text, due, priority, datetime.now(MOSCOW).isoformat()))
+        conn.commit()
+        return cur.lastrowid
+
+def get_task(user_id, task_id):
+    with connect() as conn:
+        return conn.execute(
+            "SELECT * FROM tasks WHERE user_id=? AND id=?",
+            (user_id, task_id)
+        ).fetchone()
+
+def active_tasks(user_id):
+    with connect() as conn:
+        return conn.execute("""
+            SELECT * FROM tasks
+            WHERE user_id=? AND done=0
+            ORDER BY due_datetime, priority
+        """, (user_id,)).fetchall()
+
+def complete_task(user_id, task_id):
+    with connect() as conn:
+        conn.execute("""
+            UPDATE tasks
+            SET done=1, completed_at=?
+            WHERE user_id=? AND id=?
+        """, (datetime.now(MOSCOW).isoformat(), user_id, task_id))
+        conn.commit()
+
+def delete_task(user_id, task_id):
+    with connect() as conn:
+        conn.execute(
+            "DELETE FROM tasks WHERE user_id=? AND id=?",
+            (user_id, task_id)
+        )
+        conn.commit()
+
+def history(user_id):
+    with connect() as conn:
+        return conn.execute("""
+            SELECT * FROM tasks
+            WHERE user_id=? AND done=1
+            ORDER BY completed_at DESC
+            LIMIT 10
+        """, (user_id,)).fetchall()
+
+def add_lesson(user_id, name, lesson_type, weekday, start_time, end_time):
+    with connect() as conn:
+        cur = conn.execute("""
+            INSERT INTO lessons
+            (user_id, name, lesson_type, weekday, start_time, end_time, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (
+            user_id, name, lesson_type, weekday,
+            start_time, end_time, datetime.now(MOSCOW).isoformat()
+        ))
+        conn.commit()
+        return cur.lastrowid
+
+def get_lesson(user_id, lesson_id):
+    with connect() as conn:
+        return conn.execute(
+            "SELECT * FROM lessons WHERE user_id=? AND id=?",
+            (user_id, lesson_id)
+        ).fetchone()
+
+def lessons(user_id):
+    with connect() as conn:
+        return conn.execute("""
+            SELECT * FROM lessons
+            WHERE user_id=?
+            ORDER BY weekday, start_time
+        """, (user_id,)).fetchall()
+
+def delete_lesson(user_id, lesson_id):
+    with connect() as conn:
+        conn.execute(
+            "DELETE FROM lessons WHERE user_id=? AND id=?",
+            (user_id, lesson_id)
+        )
+        conn.commit()
+
+def stats(user_id):
+    with connect() as conn:
+        total = conn.execute(
+            "SELECT COUNT(*) FROM tasks WHERE user_id=?", (user_id,)
+        ).fetchone()[0]
+        completed = conn.execute(
+            "SELECT COUNT(*) FROM tasks WHERE user_id=? AND done=1", (user_id,)
+        ).fetchone()[0]
+        active = conn.execute(
+            "SELECT COUNT(*) FROM tasks WHERE user_id=? AND done=0", (user_id,)
+        ).fetchone()[0]
+        high = conn.execute(
+            "SELECT COUNT(*) FROM tasks WHERE user_id=? AND done=0 AND priority=1",
+            (user_id,)
+        ).fetchone()[0]
+        all_lessons = conn.execute(
+            "SELECT COUNT(*) FROM lessons WHERE user_id=?", (user_id,)
+        ).fetchone()[0]
+        lectures = conn.execute(
+            "SELECT COUNT(*) FROM lessons WHERE user_id=? AND lesson_type='lecture'",
+            (user_id,)
+        ).fetchone()[0]
+        practices = conn.execute(
+            "SELECT COUNT(*) FROM lessons WHERE user_id=? AND lesson_type='practice'",
+            (user_id,)
+        ).fetchone()[0]
+
+    return total, completed, active, high, all_lessons, lectures, practices
+
+# -------------------- Time helpers --------------------
+
+def parse_time(value):
     try:
-        with open(DATA_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return {}
-
-
-def save_data(data):
-    with open(DATA_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-
-
-def get_user(data, user_id):
-    key = str(user_id)
-    if key not in data:
-        data[key] = {"tasks": [], "lessons": []}
-    return data[key]
-
-
-def next_id(items):
-    return 1 if not items else max(x["id"] for x in items) + 1
-
-
-def parse_time(text):
-    try:
-        return datetime.strptime(text.strip(), "%H:%M").time()
+        return datetime.strptime(value.strip(), "%H:%M").time()
     except ValueError:
         return None
 
-
-def parse_date(text):
-    now = datetime.now(TIMEZONE)
+def parse_date(value):
+    now = datetime.now(MOSCOW)
     for fmt in ("%d.%m.%Y", "%d.%m"):
         try:
-            d = datetime.strptime(text.strip(), fmt)
+            dt = datetime.strptime(value.strip(), fmt)
             if fmt == "%d.%m":
-                d = d.replace(year=now.year)
-                if d.date() < now.date():
-                    d = d.replace(year=now.year + 1)
-            return d.date()
+                dt = dt.replace(year=now.year)
+                if dt.date() < now.date():
+                    dt = dt.replace(year=now.year + 1)
+            return dt.date()
         except ValueError:
             pass
     return None
 
-
-def cancel_job(app, name):
-    for job in app.job_queue.get_jobs_by_name(name):
-        job.schedule_removal()
-
-
-async def task_reminder(context: ContextTypes.DEFAULT_TYPE):
-    task = context.job.data
-    due = datetime.fromisoformat(task["datetime"])
-    await context.bot.send_message(
-        chat_id=context.job.chat_id,
-        text=(
-            "⏰ Напоминание о задаче!\n\n"
-            f"📌 {task['text']}\n"
-            f"⭐ {PRIORITY_NAMES[task['priority']]}\n"
-            f"🕐 Дедлайн: {due.strftime('%d.%m в %H:%M')}"
-        ),
+def dual_time(dt_moscow):
+    bj = dt_moscow.astimezone(BEIJING)
+    return (
+        f"🇷🇺 МСК: {dt_moscow.strftime('%d.%m.%Y %H:%M')}\n"
+        f"🇨🇳 Пекин: {bj.strftime('%d.%m.%Y %H:%M')}"
     )
 
-
-async def lesson_reminder(context: ContextTypes.DEFAULT_TYPE):
-    lesson = context.job.data
-    await context.bot.send_message(
-        chat_id=context.job.chat_id,
-        text=(
-            "🎓 Скоро занятие!\n\n"
-            f"📚 {lesson['name']}\n"
-            f"🕐 Начало в {lesson['time']}\n\n"
-            "⏰ До занятия осталось 30 минут."
-        ),
-    )
-    schedule_lesson_job(context.application, context.job.chat_id, lesson)
-
-
-def schedule_task_job(app, chat_id, task):
-    if task.get("done"):
-        return
-    due = datetime.fromisoformat(task["datetime"])
-    now = datetime.now(TIMEZONE)
-    if due <= now:
-        return
-    reminder = due - timedelta(hours=1)
-    if reminder <= now:
-        reminder = now + timedelta(seconds=5)
-    name = f"task_{chat_id}_{task['id']}"
-    cancel_job(app, name)
-    app.job_queue.run_once(task_reminder, reminder, chat_id=chat_id, data=task, name=name)
-
-
-def next_lesson_datetime(lesson):
-    now = datetime.now(TIMEZONE)
-    t = datetime.strptime(lesson["time"], "%H:%M").time()
-    days = (lesson["weekday"] - now.weekday()) % 7
-    dt = datetime.combine(now.date() + timedelta(days=days), t, tzinfo=TIMEZONE)
-    if dt - timedelta(minutes=30) <= now:
+def next_lesson_start(row):
+    now = datetime.now(MOSCOW)
+    t = parse_time(row["start_time"])
+    days = (row["weekday"] - now.weekday()) % 7
+    dt = datetime.combine(now.date() + timedelta(days=days), t, tzinfo=MOSCOW)
+    if dt <= now:
         dt += timedelta(days=7)
     return dt
 
+def lesson_text(row, date=None):
+    if date is None:
+        start = next_lesson_start(row)
+    else:
+        start = datetime.combine(date, parse_time(row["start_time"]), tzinfo=MOSCOW)
 
-def schedule_lesson_job(app, chat_id, lesson):
-    dt = next_lesson_datetime(lesson)
-    reminder = dt - timedelta(minutes=30)
-    name = f"lesson_{chat_id}_{lesson['id']}"
-    cancel_job(app, name)
-    app.job_queue.run_once(lesson_reminder, reminder, chat_id=chat_id, data=lesson, name=name)
+    end = datetime.combine(start.date(), parse_time(row["end_time"]), tzinfo=MOSCOW)
+    if end <= start:
+        end += timedelta(days=1)
 
+    bj_start = start.astimezone(BEIJING)
+    bj_end = end.astimezone(BEIJING)
+
+    return (
+        f"🇷🇺 МСК: {WEEKDAY_NAMES[start.weekday()]}, "
+        f"{start.strftime('%d.%m %H:%M')}–{end.strftime('%H:%M')}\n"
+        f"🇨🇳 Пекин: {WEEKDAY_NAMES[bj_start.weekday()]}, "
+        f"{bj_start.strftime('%d.%m %H:%M')}–{bj_end.strftime('%H:%M')}"
+    )
+
+# -------------------- Keyboards --------------------
 
 def date_keyboard():
-    today = datetime.now(TIMEZONE).date()
+    today = datetime.now(MOSCOW).date()
     rows = []
     for i in range(7):
         d = today + timedelta(days=i)
-        if i == 0:
-            label = f"Сегодня · {d.strftime('%d.%m')}"
-        elif i == 1:
-            label = f"Завтра · {d.strftime('%d.%m')}"
-        else:
-            label = f"{WEEKDAY_SHORT[d.weekday()]} {d.strftime('%d.%m')}"
-        rows.append([InlineKeyboardButton(label, callback_data=f"task_date:{d.isoformat()}")])
-    rows += [
-        [InlineKeyboardButton("📅 Другая дата", callback_data="task_date:custom")],
-        [InlineKeyboardButton("❌ Отмена", callback_data="cancel")],
-    ]
+        rows.append([InlineKeyboardButton(
+            d.strftime("%d.%m"),
+            callback_data=f"task_date:{d.isoformat()}"
+        )])
+    rows.append([InlineKeyboardButton("📅 Другая дата", callback_data="task_date:custom")])
+    rows.append([InlineKeyboardButton("❌ Отмена", callback_data="cancel")])
     return InlineKeyboardMarkup(rows)
-
 
 def time_keyboard(prefix):
-    times = ["08:00","10:00","12:00","14:00","16:00","18:00","20:00"]
+    values = ["08:00", "10:00", "12:00", "14:00", "16:00", "18:00", "20:00"]
     rows = []
-    for i in range(0, len(times), 2):
+    for i in range(0, len(values), 2):
         rows.append([
-            InlineKeyboardButton(t, callback_data=f"{prefix}_time:{t}")
-            for t in times[i:i+2]
+            InlineKeyboardButton(
+                v, callback_data=f"{prefix}_time:{v}"
+            ) for v in values[i:i+2]
         ])
-    rows += [
-        [InlineKeyboardButton("🕐 Другое время", callback_data=f"{prefix}_time:custom")],
-        [InlineKeyboardButton("❌ Отмена", callback_data="cancel")],
-    ]
+    rows.append([InlineKeyboardButton("🕐 Другое время", callback_data=f"{prefix}_time:custom")])
+    rows.append([InlineKeyboardButton("❌ Отмена", callback_data="cancel")])
     return InlineKeyboardMarkup(rows)
-
 
 def priority_keyboard():
     return InlineKeyboardMarkup([
@@ -191,349 +294,413 @@ def priority_keyboard():
         [InlineKeyboardButton("❌ Отмена", callback_data="cancel")],
     ])
 
+def lesson_type_keyboard():
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("📖 Лекция", callback_data="lesson_type:lecture"),
+            InlineKeyboardButton("✏️ Практика", callback_data="lesson_type:practice"),
+        ],
+        [InlineKeyboardButton("❌ Отмена", callback_data="cancel")],
+    ])
 
 def weekday_keyboard():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("Пн", callback_data="lesson_day:0"), InlineKeyboardButton("Вт", callback_data="lesson_day:1"), InlineKeyboardButton("Ср", callback_data="lesson_day:2")],
-        [InlineKeyboardButton("Чт", callback_data="lesson_day:3"), InlineKeyboardButton("Пт", callback_data="lesson_day:4"), InlineKeyboardButton("Сб", callback_data="lesson_day:5")],
+        [
+            InlineKeyboardButton("Пн", callback_data="lesson_day:0"),
+            InlineKeyboardButton("Вт", callback_data="lesson_day:1"),
+            InlineKeyboardButton("Ср", callback_data="lesson_day:2"),
+        ],
+        [
+            InlineKeyboardButton("Чт", callback_data="lesson_day:3"),
+            InlineKeyboardButton("Пт", callback_data="lesson_day:4"),
+            InlineKeyboardButton("Сб", callback_data="lesson_day:5"),
+        ],
         [InlineKeyboardButton("Вс", callback_data="lesson_day:6")],
         [InlineKeyboardButton("❌ Отмена", callback_data="cancel")],
     ])
 
+# -------------------- Telegram handlers --------------------
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     await update.message.reply_text(
-        "👋 Привет! Я твой учебный планировщик.\n\n"
-        "📌 храню задачи и дедлайны;\n"
-        "⭐ учитываю важность;\n"
-        "🎓 храню расписание;\n"
-        "⏰ напоминаю о занятиях и задачах.\n\n"
-        "Выбери действие кнопкой 👇",
+        "👋 Учебный планировщик — Lab 2\n\n"
+        "🗄 Данные хранятся в SQLite.\n"
+        "🇷🇺 Время вводится по Москве.\n"
+        "🇨🇳 Бот показывает также время Пекина.",
         reply_markup=MAIN_MENU,
     )
-
-
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "📖 Выбери действие в меню. Для задачи нужно написать только название — "
-        "дату, время и важность можно выбрать кнопками.",
-        reply_markup=MAIN_MENU,
-    )
-
 
 async def begin_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     context.user_data["flow"] = "task_name"
     context.user_data["temp"] = {}
-    await update.message.reply_text(
-        "➕ Новая задача\n\nНапиши, что нужно сделать.\nНапример: Сдать лабораторную №1",
-        reply_markup=ReplyKeyboardRemove(),
-    )
-
+    await update.message.reply_text("Напиши название задачи:", reply_markup=ReplyKeyboardRemove())
 
 async def begin_lesson(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     context.user_data["flow"] = "lesson_name"
     context.user_data["temp"] = {}
-    await update.message.reply_text(
-        "🎓 Новое занятие\n\nНапиши название предмета.",
-        reply_markup=ReplyKeyboardRemove(),
-    )
+    await update.message.reply_text("Напиши название предмета:", reply_markup=ReplyKeyboardRemove())
 
-
-async def save_lesson_from_query(query, context, time_value):
-    temp = context.user_data["temp"]
-    data = load_data()
-    user = get_user(data, query.from_user.id)
-    lesson = {
-        "id": next_id(user["lessons"]),
-        "name": temp["name"],
-        "weekday": temp["weekday"],
-        "time": time_value,
-    }
-    user["lessons"].append(lesson)
-    save_data(data)
-    schedule_lesson_job(context.application, query.message.chat_id, lesson)
-    context.user_data.clear()
-    await query.message.reply_text(
-        "✅ Занятие добавлено!\n\n"
-        f"📚 {lesson['name']}\n"
-        f"📅 {WEEKDAY_NAMES[lesson['weekday']]}\n"
-        f"🕐 {lesson['time']}\n\n"
-        "⏰ Напомню за 30 минут.",
-        reply_markup=MAIN_MENU,
-    )
-
-
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
     data = q.data
 
     if data == "cancel":
         context.user_data.clear()
-        await q.message.reply_text("❌ Действие отменено.", reply_markup=MAIN_MENU)
+        await q.message.reply_text("❌ Отменено.", reply_markup=MAIN_MENU)
         return
 
     if data.startswith("task_date:"):
-        value = data.split(":",1)[1]
+        value = data.split(":", 1)[1]
         if value == "custom":
             context.user_data["flow"] = "task_custom_date"
-            await q.message.reply_text("📅 Напиши дату, например 25.10 или 25.10.2026")
+            await q.message.reply_text("Введи дату: 25.10 или 25.10.2026")
             return
         context.user_data["temp"]["date"] = value
-        context.user_data["flow"] = "task_choose_time"
-        await q.message.reply_text("🕐 Выбери время дедлайна:", reply_markup=time_keyboard("task"))
+        await q.message.reply_text("Выбери время:", reply_markup=time_keyboard("task"))
         return
 
     if data.startswith("task_time:"):
-        value = data.split(":",1)[1]
+        value = data.split(":", 1)[1]
         if value == "custom":
             context.user_data["flow"] = "task_custom_time"
-            await q.message.reply_text("🕐 Напиши время, например 17:30")
+            await q.message.reply_text("Введи время, например 17:30")
             return
         context.user_data["temp"]["time"] = value
-        context.user_data["flow"] = "task_choose_priority"
-        await q.message.reply_text("⭐ Насколько важна задача?", reply_markup=priority_keyboard())
+        await q.message.reply_text("Выбери важность:", reply_markup=priority_keyboard())
         return
 
     if data.startswith("priority:"):
-        priority = int(data.split(":",1)[1])
+        priority = int(data.split(":", 1)[1])
         temp = context.user_data["temp"]
-        d = datetime.fromisoformat(temp["date"]).date()
-        t = datetime.strptime(temp["time"], "%H:%M").time()
-        due = datetime.combine(d, t, tzinfo=TIMEZONE)
-        if due <= datetime.now(TIMEZONE):
-            context.user_data["flow"] = "task_choose_time"
-            await q.message.reply_text("⚠️ Это время уже прошло. Выбери другое:", reply_markup=time_keyboard("task"))
+        date = datetime.fromisoformat(temp["date"]).date()
+        due = datetime.combine(date, parse_time(temp["time"]), tzinfo=MOSCOW)
+
+        if due <= datetime.now(MOSCOW):
+            await q.message.reply_text("❌ Это время уже прошло.")
             return
-        data_all = load_data()
-        user = get_user(data_all, q.from_user.id)
-        task = {
-            "id": next_id(user["tasks"]),
-            "text": temp["text"],
-            "datetime": due.isoformat(),
-            "priority": priority,
-            "done": False,
-        }
-        user["tasks"].append(task)
-        save_data(data_all)
-        schedule_task_job(context.application, q.message.chat_id, task)
-        context.user_data.clear()
-        await q.message.reply_text(
-            "✅ Задача добавлена!\n\n"
-            f"📌 {task['text']}\n📅 {due.strftime('%d.%m.%Y')}\n"
-            f"🕐 {due.strftime('%H:%M')}\n⭐ {PRIORITY_NAMES[priority]}\n\n"
-            "⏰ Напоминание включено.",
-            reply_markup=MAIN_MENU,
-        )
+
+        try:
+            task_id = add_task(q.from_user.id, temp["text"], due.isoformat(), priority)
+            context.user_data.clear()
+            await q.message.reply_text(
+                "✅ Задача сохранена в SQLite!\n\n"
+                f"#{task_id} {temp['text']}\n"
+                f"{PRIORITY_NAMES[priority]}\n\n"
+                f"{dual_time(due)}",
+                reply_markup=MAIN_MENU,
+            )
+        except sqlite3.Error:
+            await q.message.reply_text("⚠️ Не удалось сохранить задачу в базе.")
+        return
+
+    if data.startswith("lesson_type:"):
+        context.user_data["temp"]["lesson_type"] = data.split(":", 1)[1]
+        await q.message.reply_text("Выбери день недели:", reply_markup=weekday_keyboard())
         return
 
     if data.startswith("lesson_day:"):
-        wd = int(data.split(":",1)[1])
-        context.user_data["temp"]["weekday"] = wd
-        context.user_data["flow"] = "lesson_choose_time"
-        await q.message.reply_text(
-            f"📅 {WEEKDAY_NAMES[wd]}\n\nВо сколько начинается занятие?",
-            reply_markup=time_keyboard("lesson"),
+        context.user_data["temp"]["weekday"] = int(data.split(":", 1)[1])
+        await q.message.reply_text("Выбери время начала:", reply_markup=time_keyboard("lesson_start"))
+        return
+
+    if data.startswith("lesson_start_time:"):
+        value = data.split(":", 1)[1]
+        if value == "custom":
+            context.user_data["flow"] = "lesson_custom_start"
+            await q.message.reply_text("Введи время начала, например 13:30")
+            return
+        context.user_data["temp"]["start_time"] = value
+        await q.message.reply_text("До скольки идёт занятие?", reply_markup=time_keyboard("lesson_end"))
+        return
+
+    if data.startswith("lesson_end_time:"):
+        value = data.split(":", 1)[1]
+        if value == "custom":
+            context.user_data["flow"] = "lesson_custom_end"
+            await q.message.reply_text("Введи время окончания, например 15:30")
+            return
+
+        temp = context.user_data["temp"]
+        if parse_time(value) <= parse_time(temp["start_time"]):
+            await q.message.reply_text("❌ Окончание должно быть позже начала.")
+            return
+
+        try:
+            lesson_id = add_lesson(
+                q.from_user.id, temp["name"], temp["lesson_type"],
+                temp["weekday"], temp["start_time"], value
+            )
+            row = get_lesson(q.from_user.id, lesson_id)
+            context.user_data.clear()
+            await q.message.reply_text(
+                "✅ Занятие сохранено в SQLite!\n\n"
+                f"📚 {row['name']}\n"
+                f"{LESSON_TYPES[row['lesson_type']]}\n\n"
+                f"{lesson_text(row)}",
+                reply_markup=MAIN_MENU,
+            )
+        except sqlite3.Error:
+            await q.message.reply_text("⚠️ Не удалось сохранить занятие.")
+        return
+
+    if data.startswith("done:"):
+        task_id = int(data.split(":", 1)[1])
+        row = get_task(q.from_user.id, task_id)
+        if row:
+            complete_task(q.from_user.id, task_id)
+            await q.edit_message_text(f"✅ Выполнено\n\n{row['text']}")
+        return
+
+    if data.startswith("delete:"):
+        task_id = int(data.split(":", 1)[1])
+        row = get_task(q.from_user.id, task_id)
+        if row:
+            delete_task(q.from_user.id, task_id)
+            await q.edit_message_text(f"🗑 Задача удалена\n\n{row['text']}")
+        return
+
+    if data.startswith("lesson_delete:"):
+        lesson_id = int(data.split(":", 1)[1])
+        row = get_lesson(q.from_user.id, lesson_id)
+        if row:
+            delete_lesson(q.from_user.id, lesson_id)
+            await q.edit_message_text(f"🗑 Занятие удалено\n\n{row['name']}")
+
+async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    flow = context.user_data.get("flow")
+
+    if flow == "task_name":
+        context.user_data["temp"]["text"] = text
+        await update.message.reply_text("Выбери дату:", reply_markup=date_keyboard())
+        return
+
+    if flow == "lesson_name":
+        context.user_data["temp"]["name"] = text
+        await update.message.reply_text("Выбери тип:", reply_markup=lesson_type_keyboard())
+        return
+
+    if flow == "task_custom_date":
+        date = parse_date(text)
+        if not date:
+            await update.message.reply_text("❌ Неверная дата.")
+            return
+        context.user_data["temp"]["date"] = date.isoformat()
+        await update.message.reply_text("Выбери время:", reply_markup=time_keyboard("task"))
+        return
+
+    if flow == "task_custom_time":
+        t = parse_time(text)
+        if not t:
+            await update.message.reply_text("❌ Формат HH:MM.")
+            return
+        context.user_data["temp"]["time"] = t.strftime("%H:%M")
+        await update.message.reply_text("Выбери важность:", reply_markup=priority_keyboard())
+        return
+
+    if flow == "lesson_custom_start":
+        t = parse_time(text)
+        if not t:
+            await update.message.reply_text("❌ Формат HH:MM.")
+            return
+        context.user_data["temp"]["start_time"] = t.strftime("%H:%M")
+        await update.message.reply_text("До скольки идёт занятие?", reply_markup=time_keyboard("lesson_end"))
+        return
+
+    if flow == "lesson_custom_end":
+        end = parse_time(text)
+        if not end:
+            await update.message.reply_text("❌ Формат HH:MM.")
+            return
+        temp = context.user_data["temp"]
+        if end <= parse_time(temp["start_time"]):
+            await update.message.reply_text("❌ Окончание должно быть позже начала.")
+            return
+
+        lesson_id = add_lesson(
+            update.effective_user.id, temp["name"], temp["lesson_type"],
+            temp["weekday"], temp["start_time"], end.strftime("%H:%M")
+        )
+        row = get_lesson(update.effective_user.id, lesson_id)
+        context.user_data.clear()
+        await update.message.reply_text(
+            "✅ Занятие сохранено в SQLite!\n\n"
+            f"📚 {row['name']}\n"
+            f"{LESSON_TYPES[row['lesson_type']]}\n\n"
+            f"{lesson_text(row)}",
+            reply_markup=MAIN_MENU,
         )
         return
 
-    if data.startswith("lesson_time:"):
-        value = data.split(":",1)[1]
-        if value == "custom":
-            context.user_data["flow"] = "lesson_custom_time"
-            await q.message.reply_text("🕐 Напиши время начала, например 13:30")
-            return
-        await save_lesson_from_query(q, context, value)
+    if text == "➕ Добавить задачу":
+        await begin_task(update, context)
+    elif text == "➕ Добавить занятие":
+        await begin_lesson(update, context)
+    elif text == "📋 Все задачи":
+        await show_tasks(update)
+    elif text == "📚 Расписание":
+        await show_schedule(update)
+    elif text == "📅 Сегодня":
+        await show_today(update)
+    elif text == "🗓 Неделя":
+        await show_week(update)
+    elif text == "📊 Статистика":
+        await show_stats(update)
+    elif text == "🕘 История":
+        await show_history(update)
+    else:
+        await update.message.reply_text("Выбери действие кнопкой 👇", reply_markup=MAIN_MENU)
+
+async def show_tasks(update: Update):
+    rows = active_tasks(update.effective_user.id)
+    if not rows:
+        await update.message.reply_text("📭 Активных задач нет.", reply_markup=MAIN_MENU)
         return
 
-    if data.startswith("done:") or data.startswith("delete:"):
-        action, raw_id = data.split(":",1)
-        task_id = int(raw_id)
-        all_data = load_data()
-        user = get_user(all_data, q.from_user.id)
-        for task in list(user["tasks"]):
-            if task["id"] == task_id:
-                cancel_job(context.application, f"task_{q.message.chat_id}_{task_id}")
-                if action == "done":
-                    task["done"] = True
-                    save_data(all_data)
-                    await q.edit_message_text(f"✅ Выполнено\n\n📌 {task['text']}")
-                else:
-                    user["tasks"].remove(task)
-                    save_data(all_data)
-                    await q.edit_message_text(f"🗑 Задача удалена\n\n{task['text']}")
-                return
-
-    if data.startswith("lesson_delete:"):
-        lesson_id = int(data.split(":",1)[1])
-        all_data = load_data()
-        user = get_user(all_data, q.from_user.id)
-        for lesson in list(user["lessons"]):
-            if lesson["id"] == lesson_id:
-                user["lessons"].remove(lesson)
-                save_data(all_data)
-                cancel_job(context.application, f"lesson_{q.message.chat_id}_{lesson_id}")
-                await q.edit_message_text(f"🗑 Занятие удалено\n\n{lesson['name']}")
-                return
-
-
-async def show_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    data = load_data(); user = get_user(data, update.effective_user.id)
-    tasks = [x for x in user["tasks"] if not x["done"]]
-    tasks.sort(key=lambda x: (datetime.fromisoformat(x["datetime"]), x["priority"]))
-    if not tasks:
-        await update.message.reply_text("📭 Активных задач нет.", reply_markup=MAIN_MENU); return
     await update.message.reply_text("📋 Все активные задачи:")
-    for task in tasks:
-        due = datetime.fromisoformat(task["datetime"])
+    for row in rows:
+        due = datetime.fromisoformat(row["due_datetime"])
         kb = InlineKeyboardMarkup([[
-            InlineKeyboardButton("✅ Выполнено", callback_data=f"done:{task['id']}"),
-            InlineKeyboardButton("🗑 Удалить", callback_data=f"delete:{task['id']}")
+            InlineKeyboardButton("✅ Выполнено", callback_data=f"done:{row['id']}"),
+            InlineKeyboardButton("🗑 Удалить", callback_data=f"delete:{row['id']}"),
         ]])
         await update.message.reply_text(
-            f"{PRIORITY_NAMES[task['priority']]}\n📌 {task['text']}\n"
-            f"📅 {due.strftime('%d.%m.%Y')}\n🕐 {due.strftime('%H:%M')}",
+            f"{PRIORITY_NAMES[row['priority']]}\n"
+            f"📌 {row['text']}\n\n{dual_time(due)}",
             reply_markup=kb,
         )
 
+async def show_schedule(update: Update):
+    rows = lessons(update.effective_user.id)
+    if not rows:
+        await update.message.reply_text("📚 Расписание пустое.", reply_markup=MAIN_MENU)
+        return
 
-async def show_today(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    data=load_data(); user=get_user(data, update.effective_user.id)
-    today=datetime.now(TIMEZONE).date()
-    lessons=[x for x in user["lessons"] if x["weekday"]==today.weekday()]
-    tasks=[]
-    for x in user["tasks"]:
-        if not x["done"] and datetime.fromisoformat(x["datetime"]).date()==today:
-            tasks.append(x)
-    text=f"📅 {WEEKDAY_NAMES[today.weekday()]}, {today.strftime('%d.%m.%Y')}\n\n🎓 ЗАНЯТИЯ\n"
-    if lessons:
-        for x in sorted(lessons,key=lambda z:z["time"]): text += f"• {x['time']} — {x['name']}\n"
-    else: text += "Сегодня занятий нет.\n"
-    text += "\n📌 ЗАДАЧИ\n"
-    if tasks:
-        for x in sorted(tasks,key=lambda z:(z["datetime"],z["priority"])):
-            due=datetime.fromisoformat(x["datetime"])
-            text += f"• {due.strftime('%H:%M')} {PRIORITY_NAMES[x['priority']]} — {x['text']}\n"
-    else: text += "На сегодня задач нет."
-    await update.message.reply_text(text, reply_markup=MAIN_MENU)
-
-
-async def show_week(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    data=load_data(); user=get_user(data, update.effective_user.id)
-    today=datetime.now(TIMEZONE).date(); text="🗓 План на ближайшие 7 дней\n"; found=False
-    for offset in range(7):
-        day=today+timedelta(days=offset)
-        lessons=[x for x in user["lessons"] if x["weekday"]==day.weekday()]
-        tasks=[x for x in user["tasks"] if (not x["done"] and datetime.fromisoformat(x["datetime"]).date()==day)]
-        if not lessons and not tasks: continue
-        found=True; text += f"\n📅 {WEEKDAY_SHORT[day.weekday()]}, {day.strftime('%d.%m')}\n"
-        for x in sorted(lessons,key=lambda z:z["time"]): text += f"🎓 {x['time']} — {x['name']}\n"
-        for x in sorted(tasks,key=lambda z:(z["datetime"],z["priority"])):
-            due=datetime.fromisoformat(x["datetime"])
-            text += f"📌 {due.strftime('%H:%M')} {PRIORITY_NAMES[x['priority']]} — {x['text']}\n"
-    if not found: text += "\nНа ближайшие 7 дней ничего не запланировано."
-    await update.message.reply_text(text, reply_markup=MAIN_MENU)
-
-
-async def show_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    data=load_data(); user=get_user(data, update.effective_user.id)
-    lessons=sorted(user["lessons"],key=lambda x:(x["weekday"],x["time"]))
-    if not lessons:
-        await update.message.reply_text("📚 Расписание пока пустое.\n\nНажми «➕ Добавить занятие».", reply_markup=MAIN_MENU); return
-    await update.message.reply_text("📚 Расписание университета:")
-    current=None
-    for lesson in lessons:
-        if lesson["weekday"] != current:
-            current=lesson["weekday"]
-            await update.message.reply_text(f"📅 {WEEKDAY_NAMES[current]}")
-        kb=InlineKeyboardMarkup([[InlineKeyboardButton("🗑 Удалить занятие", callback_data=f"lesson_delete:{lesson['id']}")]])
-        await update.message.reply_text(f"🕐 {lesson['time']}\n📚 {lesson['name']}", reply_markup=kb)
-
-
-async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text=update.message.text; flow=context.user_data.get("flow")
-
-    if flow == "task_name":
-        context.user_data["temp"]["text"] = text.strip()
-        context.user_data["flow"] = "task_choose_date"
-        await update.message.reply_text("Теперь выбери дату:", reply_markup=date_keyboard()); return
-
-    if flow == "lesson_name":
-        context.user_data["temp"]["name"] = text.strip()
-        context.user_data["flow"] = "lesson_choose_day"
-        await update.message.reply_text("📅 В какой день проходит занятие?", reply_markup=weekday_keyboard()); return
-
-    if flow == "task_custom_date":
-        d=parse_date(text)
-        if not d:
-            await update.message.reply_text("❌ Не понимаю дату. Например: 25.10"); return
-        context.user_data["temp"]["date"] = d.isoformat()
-        context.user_data["flow"] = "task_choose_time"
-        await update.message.reply_text("🕐 Теперь выбери время:", reply_markup=time_keyboard("task")); return
-
-    if flow == "task_custom_time":
-        t=parse_time(text)
-        if not t:
-            await update.message.reply_text("❌ Используй формат HH:MM, например 17:30"); return
-        context.user_data["temp"]["time"] = t.strftime("%H:%M")
-        context.user_data["flow"] = "task_choose_priority"
-        await update.message.reply_text("⭐ Выбери важность:", reply_markup=priority_keyboard()); return
-
-    if flow == "lesson_custom_time":
-        t=parse_time(text)
-        if not t:
-            await update.message.reply_text("❌ Используй формат HH:MM"); return
-        temp=context.user_data["temp"]; all_data=load_data(); user=get_user(all_data, update.effective_user.id)
-        lesson={"id":next_id(user["lessons"]),"name":temp["name"],"weekday":temp["weekday"],"time":t.strftime("%H:%M")}
-        user["lessons"].append(lesson); save_data(all_data)
-        schedule_lesson_job(context.application, update.effective_chat.id, lesson)
-        context.user_data.clear()
+    await update.message.reply_text("📚 Расписание\n🇷🇺 Москва → 🇨🇳 Пекин")
+    for row in rows:
+        kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton("🗑 Удалить занятие", callback_data=f"lesson_delete:{row['id']}")
+        ]])
         await update.message.reply_text(
-            f"✅ Занятие добавлено!\n\n📚 {lesson['name']}\n📅 {WEEKDAY_NAMES[lesson['weekday']]}\n🕐 {lesson['time']}",
-            reply_markup=MAIN_MENU,
-        ); return
+            f"📚 {row['name']}\n"
+            f"{LESSON_TYPES[row['lesson_type']]}\n\n"
+            f"{lesson_text(row)}",
+            reply_markup=kb,
+        )
 
-    if text == "➕ Добавить задачу": await begin_task(update, context); return
-    if text == "➕ Добавить занятие": await begin_lesson(update, context); return
-    if text == "📅 Сегодня": await show_today(update, context); return
-    if text == "🗓 Неделя": await show_week(update, context); return
-    if text == "📚 Расписание": await show_schedule(update, context); return
-    if text == "📋 Все задачи": await show_tasks(update, context); return
+async def show_today(update: Update):
+    user_id = update.effective_user.id
+    today = datetime.now(MOSCOW).date()
+    task_rows = [
+        r for r in active_tasks(user_id)
+        if datetime.fromisoformat(r["due_datetime"]).date() == today
+    ]
+    lesson_rows = [r for r in lessons(user_id) if r["weekday"] == today.weekday()]
 
-    await update.message.reply_text("Выбери действие кнопкой 👇", reply_markup=MAIN_MENU)
+    text = f"📅 Сегодня, {today.strftime('%d.%m.%Y')}\n\n🎓 ЗАНЯТИЯ\n"
+    if lesson_rows:
+        for row in lesson_rows:
+            text += f"\n{row['name']} — {LESSON_TYPES[row['lesson_type']]}\n{lesson_text(row, today)}\n"
+    else:
+        text += "Нет занятий.\n"
 
+    text += "\n📌 ЗАДАЧИ\n"
+    if task_rows:
+        for row in task_rows:
+            text += f"\n{PRIORITY_NAMES[row['priority']]} {row['text']}\n{dual_time(datetime.fromisoformat(row['due_datetime']))}\n"
+    else:
+        text += "Нет задач."
+
+    await update.message.reply_text(text, reply_markup=MAIN_MENU)
+
+async def show_week(update: Update):
+    user_id = update.effective_user.id
+    start = datetime.now(MOSCOW).date()
+    task_rows = active_tasks(user_id)
+    lesson_rows = lessons(user_id)
+    text = "🗓 План на 7 дней\n"
+    found = False
+
+    for offset in range(7):
+        day = start + timedelta(days=offset)
+        day_tasks = [r for r in task_rows if datetime.fromisoformat(r["due_datetime"]).date() == day]
+        day_lessons = [r for r in lesson_rows if r["weekday"] == day.weekday()]
+        if not day_tasks and not day_lessons:
+            continue
+        found = True
+        text += f"\n📅 {WEEKDAY_NAMES[day.weekday()]}, {day.strftime('%d.%m')}\n"
+        for row in day_lessons:
+            text += f"🎓 {row['name']} — {LESSON_TYPES[row['lesson_type']]}\n{lesson_text(row, day)}\n"
+        for row in day_tasks:
+            text += f"📌 {row['text']} — {PRIORITY_NAMES[row['priority']]}\n{dual_time(datetime.fromisoformat(row['due_datetime']))}\n"
+
+    if not found:
+        text += "\nНичего не запланировано."
+
+    await update.message.reply_text(text, reply_markup=MAIN_MENU)
+
+async def show_stats(update: Update):
+    total, completed, active, high, lesson_count, lectures, practices = stats(update.effective_user.id)
+    await update.message.reply_text(
+        "📊 Статистика\n\n"
+        f"Всего задач: {total}\n"
+        f"✅ Выполнено: {completed}\n"
+        f"⏳ Активных: {active}\n"
+        f"🔴 Высокий приоритет: {high}\n\n"
+        f"🎓 Всего занятий: {lesson_count}\n"
+        f"📖 Лекций: {lectures}\n"
+        f"✏️ Практик: {practices}",
+        reply_markup=MAIN_MENU,
+    )
+
+async def show_history(update: Update):
+    rows = history(update.effective_user.id)
+    if not rows:
+        await update.message.reply_text("🕘 История пока пустая.", reply_markup=MAIN_MENU)
+        return
+
+    text = "🕘 Последние выполненные задачи\n"
+    for row in rows:
+        completed = datetime.fromisoformat(row["completed_at"])
+        text += f"\n✅ {row['text']}\n{completed.strftime('%d.%m.%Y %H:%M')}\n"
+
+    await update.message.reply_text(text, reply_markup=MAIN_MENU)
+
+async def error_handler(update, context):
+    print("Ошибка:", context.error)
+    if isinstance(update, Update) and update.effective_message:
+        try:
+            await update.effective_message.reply_text("⚠️ Произошла ошибка. Попробуй ещё раз.")
+        except Exception:
+            pass
 
 async def post_init(application):
+    init_db()
     await application.bot.set_my_commands([
         BotCommand("start", "Открыть главное меню"),
-        BotCommand("help", "Помощь"),
     ])
-    data=load_data()
-    for user_id,user in data.items():
-        chat_id=int(user_id)
-        for task in user.get("tasks",[]): schedule_task_job(application,chat_id,task)
-        for lesson in user.get("lessons",[]): schedule_lesson_job(application,chat_id,lesson)
 
+application = (
+    Application.builder()
+    .token(TOKEN)
+    .post_init(post_init)
+    .build()
+)
 
-async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
-    print("Ошибка:", context.error)
+application.add_handler(CommandHandler("start", start))
+application.add_handler(CallbackQueryHandler(callbacks))
+application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
+application.add_error_handler(error_handler)
 
+print("✅ LAB 2 запущена")
+print("🗄 Источник данных: SQLite")
+print("📊 Статистика и история включены")
 
-def main():
-    if not TOKEN:
-        raise RuntimeError("BOT_TOKEN не задан. В Google Colab сначала сохраните токен в os.environ['BOT_TOKEN'].")
-    app=(Application.builder().token(TOKEN).post_init(post_init).build())
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("help", help_command))
-    app.add_handler(CallbackQueryHandler(button_handler))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
-    app.add_error_handler(error_handler)
-    print("✅ Учебный планировщик запущен!")
-    app.run_polling(close_loop=False, drop_pending_updates=True)
-
-
-if __name__ == "__main__":
-    main()
+application.run_polling(
+    close_loop=False,
+    drop_pending_updates=True,
+)
