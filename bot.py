@@ -14,7 +14,6 @@ from telegram import (
     InlineKeyboardButton,
     BotCommand,
 )
-
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -24,10 +23,7 @@ from telegram.ext import (
     filters,
 )
 
-
-# =========================================================
-# НАСТРОЙКИ
-# =========================================================
+# -------------------- Настройки --------------------
 
 load_dotenv()
 
@@ -35,7 +31,6 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
 )
-
 logger = logging.getLogger(__name__)
 
 TOKEN = os.getenv("BOT_TOKEN")
@@ -45,21 +40,13 @@ if not TOKEN:
         "BOT_TOKEN не найден. Добавьте токен в переменные окружения."
     )
 
-
-# Railway Volume.
-# На компьютере база будет рядом с bot.py.
-# На Railway база будет храниться в подключенном Volume.
 DATA_PATH = os.getenv("RAILWAY_VOLUME_MOUNT_PATH", ".")
-
 os.makedirs(DATA_PATH, exist_ok=True)
 
 DB_FILE = os.path.join(DATA_PATH, "planner.db")
 
-
-# Часовые пояса
 MOSCOW = ZoneInfo("Europe/Moscow")
 BEIJING = ZoneInfo("Asia/Shanghai")
-
 
 PRIORITY_NAMES = {
     1: "🔴 Высокая",
@@ -67,12 +54,10 @@ PRIORITY_NAMES = {
     3: "🟢 Низкая",
 }
 
-
 LESSON_TYPES = {
     "lecture": "📖 Лекция",
     "practice": "✏️ Практика",
 }
-
 
 WEEKDAY_NAMES = {
     0: "Понедельник",
@@ -83,11 +68,6 @@ WEEKDAY_NAMES = {
     5: "Суббота",
     6: "Воскресенье",
 }
-
-
-# =========================================================
-# ГЛАВНОЕ МЕНЮ
-# =========================================================
 
 MAIN_MENU = ReplyKeyboardMarkup(
     [
@@ -102,9 +82,7 @@ MAIN_MENU = ReplyKeyboardMarkup(
 )
 
 
-# =========================================================
-# SQLITE
-# =========================================================
+# -------------------- SQLite --------------------
 
 def connect():
     conn = sqlite3.connect(DB_FILE)
@@ -114,8 +92,6 @@ def connect():
 
 def init_db():
     with connect() as conn:
-
-        # Таблица задач
         conn.execute("""
             CREATE TABLE IF NOT EXISTS tasks (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -129,7 +105,6 @@ def init_db():
             )
         """)
 
-        # Таблица занятий
         conn.execute("""
             CREATE TABLE IF NOT EXISTS lessons (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -143,7 +118,6 @@ def init_db():
             )
         """)
 
-        # Настройки пользователя
         conn.execute("""
             CREATE TABLE IF NOT EXISTS user_settings (
                 user_id INTEGER PRIMARY KEY,
@@ -156,18 +130,10 @@ def init_db():
     logger.info("База данных инициализирована: %s", DB_FILE)
 
 
-# =========================================================
-# НАСТРОЙКИ ПОЛЬЗОВАТЕЛЯ
-# =========================================================
-
 def get_user_timezone(user_id):
     with connect() as conn:
         row = conn.execute(
-            """
-            SELECT timezone
-            FROM user_settings
-            WHERE user_id=?
-            """,
+            "SELECT timezone FROM user_settings WHERE user_id=?",
             (user_id,),
         ).fetchone()
 
@@ -179,119 +145,64 @@ def get_user_timezone(user_id):
 
 def set_user_timezone(user_id, timezone):
     with connect() as conn:
-        conn.execute(
-            """
+        conn.execute("""
             INSERT INTO user_settings (user_id, timezone)
             VALUES (?, ?)
             ON CONFLICT(user_id)
             DO UPDATE SET timezone=excluded.timezone
-            """,
-            (user_id, timezone),
-        )
+        """, (user_id, timezone))
 
         conn.commit()
 
-    logger.info(
-        "Пользователь %s выбрал timezone=%s",
-        user_id,
-        timezone,
-    )
 
-
-def timezone_object(timezone):
-    if timezone == "beijing":
-        return BEIJING
-
-    return MOSCOW
-
-
-def timezone_name(timezone):
-    if timezone == "beijing":
-        return "🇨🇳 Пекин"
-
-    return "🇷🇺 Москва"
-
-
-# =========================================================
-# РАБОТА С ЗАДАЧАМИ
-# =========================================================
+# -------------------- Задачи --------------------
 
 def add_task(user_id, text, due, priority):
     with connect() as conn:
-        cur = conn.execute(
-            """
+        cur = conn.execute("""
             INSERT INTO tasks
-            (
-                user_id,
-                text,
-                due_datetime,
-                priority,
-                done,
-                created_at
-            )
+            (user_id, text, due_datetime, priority, done, created_at)
             VALUES (?, ?, ?, ?, 0, ?)
-            """,
-            (
-                user_id,
-                text,
-                due,
-                priority,
-                datetime.now(MOSCOW).isoformat(),
-            ),
-        )
+        """, (
+            user_id,
+            text,
+            due,
+            priority,
+            datetime.now(MOSCOW).isoformat(),
+        ))
 
         conn.commit()
-
-        task_id = cur.lastrowid
-
-    logger.info(
-        "Добавлена задача #%s пользователем %s",
-        task_id,
-        user_id,
-    )
-
-    return task_id
+        return cur.lastrowid
 
 
 def get_task(user_id, task_id):
     with connect() as conn:
         return conn.execute(
-            """
-            SELECT *
-            FROM tasks
-            WHERE user_id=? AND id=?
-            """,
+            "SELECT * FROM tasks WHERE user_id=? AND id=?",
             (user_id, task_id),
         ).fetchone()
 
 
 def active_tasks(user_id):
     with connect() as conn:
-        return conn.execute(
-            """
-            SELECT *
-            FROM tasks
+        return conn.execute("""
+            SELECT * FROM tasks
             WHERE user_id=? AND done=0
             ORDER BY due_datetime, priority
-            """,
-            (user_id,),
-        ).fetchall()
+        """, (user_id,)).fetchall()
 
 
 def complete_task(user_id, task_id):
     with connect() as conn:
-        conn.execute(
-            """
+        conn.execute("""
             UPDATE tasks
             SET done=1, completed_at=?
             WHERE user_id=? AND id=?
-            """,
-            (
-                datetime.now(MOSCOW).isoformat(),
-                user_id,
-                task_id,
-            ),
-        )
+        """, (
+            datetime.now(MOSCOW).isoformat(),
+            user_id,
+            task_id,
+        ))
 
         conn.commit()
 
@@ -299,10 +210,7 @@ def complete_task(user_id, task_id):
 def delete_task(user_id, task_id):
     with connect() as conn:
         conn.execute(
-            """
-            DELETE FROM tasks
-            WHERE user_id=? AND id=?
-            """,
+            "DELETE FROM tasks WHERE user_id=? AND id=?",
             (user_id, task_id),
         )
 
@@ -311,21 +219,15 @@ def delete_task(user_id, task_id):
 
 def history(user_id):
     with connect() as conn:
-        return conn.execute(
-            """
-            SELECT *
-            FROM tasks
+        return conn.execute("""
+            SELECT * FROM tasks
             WHERE user_id=? AND done=1
             ORDER BY completed_at DESC
             LIMIT 10
-            """,
-            (user_id,),
-        ).fetchall()
+        """, (user_id,)).fetchall()
 
 
-# =========================================================
-# РАБОТА С РАСПИСАНИЕМ
-# =========================================================
+# -------------------- Расписание --------------------
 
 def add_lesson(
     user_id,
@@ -336,8 +238,7 @@ def add_lesson(
     end_time,
 ):
     with connect() as conn:
-        cur = conn.execute(
-            """
+        cur = conn.execute("""
             INSERT INTO lessons
             (
                 user_id,
@@ -349,90 +250,63 @@ def add_lesson(
                 created_at
             )
             VALUES (?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                user_id,
-                name,
-                lesson_type,
-                weekday,
-                start_time,
-                end_time,
-                datetime.now(MOSCOW).isoformat(),
-            ),
-        )
+        """, (
+            user_id,
+            name,
+            lesson_type,
+            weekday,
+            start_time,
+            end_time,
+            datetime.now(MOSCOW).isoformat(),
+        ))
 
         conn.commit()
-
-        lesson_id = cur.lastrowid
-
-    return lesson_id
+        return cur.lastrowid
 
 
 def get_lesson(user_id, lesson_id):
     with connect() as conn:
         return conn.execute(
-            """
-            SELECT *
-            FROM lessons
-            WHERE user_id=? AND id=?
-            """,
+            "SELECT * FROM lessons WHERE user_id=? AND id=?",
             (user_id, lesson_id),
         ).fetchone()
 
 
 def lessons(user_id):
     with connect() as conn:
-        return conn.execute(
-            """
-            SELECT *
-            FROM lessons
+        return conn.execute("""
+            SELECT * FROM lessons
             WHERE user_id=?
             ORDER BY weekday, start_time
-            """,
-            (user_id,),
-        ).fetchall()
+        """, (user_id,)).fetchall()
 
 
 def delete_lesson(user_id, lesson_id):
     with connect() as conn:
         conn.execute(
-            """
-            DELETE FROM lessons
-            WHERE user_id=? AND id=?
-            """,
+            "DELETE FROM lessons WHERE user_id=? AND id=?",
             (user_id, lesson_id),
         )
 
         conn.commit()
 
 
-# =========================================================
-# СТАТИСТИКА
-# =========================================================
+# -------------------- Статистика --------------------
 
 def stats(user_id):
     with connect() as conn:
-
         total = conn.execute(
             "SELECT COUNT(*) FROM tasks WHERE user_id=?",
             (user_id,),
         ).fetchone()[0]
 
         completed = conn.execute(
-            """
-            SELECT COUNT(*)
-            FROM tasks
-            WHERE user_id=? AND done=1
-            """,
+            "SELECT COUNT(*) FROM tasks WHERE user_id=? AND done=1",
             (user_id,),
         ).fetchone()[0]
 
         active = conn.execute(
-            """
-            SELECT COUNT(*)
-            FROM tasks
-            WHERE user_id=? AND done=0
-            """,
+            "SELECT COUNT(*) FROM tasks WHERE user_id=? AND done=0",
             (user_id,),
         ).fetchone()[0]
 
@@ -440,19 +314,13 @@ def stats(user_id):
             """
             SELECT COUNT(*)
             FROM tasks
-            WHERE user_id=?
-              AND done=0
-              AND priority=1
+            WHERE user_id=? AND done=0 AND priority=1
             """,
             (user_id,),
         ).fetchone()[0]
 
         all_lessons = conn.execute(
-            """
-            SELECT COUNT(*)
-            FROM lessons
-            WHERE user_id=?
-            """,
+            "SELECT COUNT(*) FROM lessons WHERE user_id=?",
             (user_id,),
         ).fetchone()[0]
 
@@ -460,8 +328,7 @@ def stats(user_id):
             """
             SELECT COUNT(*)
             FROM lessons
-            WHERE user_id=?
-              AND lesson_type='lecture'
+            WHERE user_id=? AND lesson_type='lecture'
             """,
             (user_id,),
         ).fetchone()[0]
@@ -470,8 +337,7 @@ def stats(user_id):
             """
             SELECT COUNT(*)
             FROM lessons
-            WHERE user_id=?
-              AND lesson_type='practice'
+            WHERE user_id=? AND lesson_type='practice'
             """,
             (user_id,),
         ).fetchone()[0]
@@ -487,9 +353,21 @@ def stats(user_id):
     )
 
 
-# =========================================================
-# ВРЕМЯ
-# =========================================================
+# -------------------- Часовые пояса --------------------
+
+def timezone_object(timezone):
+    if timezone == "beijing":
+        return BEIJING
+
+    return MOSCOW
+
+
+def timezone_name(timezone):
+    if timezone == "beijing":
+        return "🇨🇳 Пекин"
+
+    return "🇷🇺 Москва"
+
 
 def parse_time(value):
     try:
@@ -503,12 +381,11 @@ def parse_time(value):
 
 
 def parse_date(value, timezone):
-    tz = timezone_object(timezone)
-
-    now = datetime.now(tz)
+    now = datetime.now(
+        timezone_object(timezone)
+    )
 
     for fmt in ("%d.%m.%Y", "%d.%m"):
-
         try:
             dt = datetime.strptime(
                 value.strip(),
@@ -516,7 +393,9 @@ def parse_date(value, timezone):
             )
 
             if fmt == "%d.%m":
-                dt = dt.replace(year=now.year)
+                dt = dt.replace(
+                    year=now.year
+                )
 
                 if dt.date() < now.date():
                     dt = dt.replace(
@@ -532,71 +411,80 @@ def parse_date(value, timezone):
 
 
 def ensure_moscow(dt):
-    """
-    Старые записи тоже будут корректно обработаны.
-    """
     if dt.tzinfo is None:
-        return dt.replace(tzinfo=MOSCOW)
+        return dt.replace(
+            tzinfo=MOSCOW
+        )
 
-    return dt.astimezone(MOSCOW)
-
-
-def display_datetime(dt_moscow, timezone):
-    """
-    Показывает дату и время только
-    в выбранном пользователем часовом поясе.
-    """
-    dt_moscow = ensure_moscow(dt_moscow)
-
-    tz = timezone_object(timezone)
-
-    local_dt = dt_moscow.astimezone(tz)
-
-    return (
-        f"{timezone_name(timezone)}: "
-        f"{local_dt.strftime('%d.%m.%Y %H:%M')}"
+    return dt.astimezone(
+        MOSCOW
     )
 
 
-# =========================================================
-# РАСПИСАНИЕ И ЧАСОВЫЕ ПОЯСА
-# =========================================================
+def display_datetime(
+    dt_moscow,
+    timezone,
+):
+    dt_moscow = ensure_moscow(
+        dt_moscow
+    )
+
+    local_dt = dt_moscow.astimezone(
+        timezone_object(timezone)
+    )
+
+    date_text = local_dt.strftime(
+        "%d.%m.%Y %H:%M"
+    )
+
+    return (
+        f"{timezone_name(timezone)}: "
+        f"{date_text}"
+    )
+
+
+# -------------------- Работа с расписанием --------------------
 
 def next_lesson_start(row):
-    """
-    Занятия внутри базы хранятся по Москве.
-    """
     now = datetime.now(MOSCOW)
 
-    lesson_time = parse_time(
+    start_time = parse_time(
         row["start_time"]
     )
 
     days = (
-        row["weekday"] - now.weekday()
+        row["weekday"]
+        - now.weekday()
     ) % 7
 
     start = datetime.combine(
-        now.date() + timedelta(days=days),
-        lesson_time,
+        now.date()
+        + timedelta(days=days),
+        start_time,
         tzinfo=MOSCOW,
     )
 
     if start <= now:
-        start += timedelta(days=7)
+        start += timedelta(
+            days=7
+        )
 
     return start
 
 
-def get_lesson_end(row, start):
+def lesson_end(row, start):
     end = datetime.combine(
         start.date(),
-        parse_time(row["end_time"]),
+        parse_time(
+            row["end_time"]
+        ),
         tzinfo=MOSCOW,
     )
 
     if end <= start:
-        end += timedelta(days=1)
+        end += timedelta(
+            days=1
+        )
 
     return end
 
@@ -607,78 +495,60 @@ def lesson_input_to_moscow(
     end_time,
     timezone,
 ):
-    """
-    Пользователь вводит занятие в своем часовом поясе.
-    Перед сохранением переводим его в московское время.
+    tz = timezone_object(
+        timezone
+    )
 
-    Так пользователь может потом поменять настройки,
-    а занятие будет отображаться правильно.
-    """
-
-    tz = timezone_object(timezone)
-
-    # 01.01.2024 был понедельником.
     reference_monday = date(
         2024,
         1,
         1,
     )
 
-    lesson_date = (
+    local_date = (
         reference_monday
         + timedelta(days=weekday)
     )
 
     start_local = datetime.combine(
-        lesson_date,
+        local_date,
         parse_time(start_time),
         tzinfo=tz,
     )
 
     end_local = datetime.combine(
-        lesson_date,
+        local_date,
         parse_time(end_time),
         tzinfo=tz,
     )
 
     start_moscow = (
-        start_local.astimezone(MOSCOW)
+        start_local.astimezone(
+            MOSCOW
+        )
     )
 
     end_moscow = (
-        end_local.astimezone(MOSCOW)
-    )
-
-    moscow_weekday = (
-        start_moscow.weekday()
-    )
-
-    moscow_start = (
-        start_moscow.strftime("%H:%M")
-    )
-
-    moscow_end = (
-        end_moscow.strftime("%H:%M")
+        end_local.astimezone(
+            MOSCOW
+        )
     )
 
     return (
-        moscow_weekday,
-        moscow_start,
-        moscow_end,
+        start_moscow.weekday(),
+        start_moscow.strftime("%H:%M"),
+        end_moscow.strftime("%H:%M"),
     )
 
 
-def lesson_interval_for_local_date(
+def lesson_for_local_date(
     row,
     local_date,
     timezone,
 ):
-    """
-    Ищем занятие, которое попадает
-    на конкретную дату пользователя.
-    """
-
-    tz = timezone_object(timezone)
+    tz = timezone_object(
+        timezone
+    )
 
     local_midnight = datetime.combine(
         local_date,
@@ -686,17 +556,15 @@ def lesson_interval_for_local_date(
         tzinfo=tz,
     )
 
-    approximate_moscow_date = (
-        local_midnight.astimezone(MOSCOW).date()
+    moscow_date = (
+        local_midnight
+        .astimezone(MOSCOW)
+        .date()
     )
 
-    # Проверяем несколько ближайших дней,
-    # потому что Пекин и Москва могут иметь
-    # разные календарные даты.
     for offset in range(-1, 3):
-
         candidate_date = (
-            approximate_moscow_date
+            moscow_date
             + timedelta(days=offset)
         )
 
@@ -708,21 +576,21 @@ def lesson_interval_for_local_date(
 
         start = datetime.combine(
             candidate_date,
-            parse_time(row["start_time"]),
+            parse_time(
+                row["start_time"]
+            ),
             tzinfo=MOSCOW,
         )
 
-        end = get_lesson_end(
+        end = lesson_end(
             row,
             start,
         )
 
-        local_start = (
-            start.astimezone(tz)
-        )
-
         if (
-            local_start.date()
+            start
+            .astimezone(tz)
+            .date()
             == local_date
         ):
             return start, end
@@ -735,14 +603,18 @@ def lesson_text(
     timezone,
     local_date=None,
 ):
-    tz = timezone_object(timezone)
-
     if local_date is None:
-        start = next_lesson_start(row)
-        end = get_lesson_end(row, start)
+        start = next_lesson_start(
+            row
+        )
+
+        end = lesson_end(
+            row,
+            start,
+        )
 
     else:
-        interval = lesson_interval_for_local_date(
+        interval = lesson_for_local_date(
             row,
             local_date,
             timezone,
@@ -753,20 +625,38 @@ def lesson_text(
 
         start, end = interval
 
-    local_start = start.astimezone(tz)
-    local_end = end.astimezone(tz)
+    tz = timezone_object(
+        timezone
+    )
+
+    local_start = (
+        start.astimezone(tz)
+    )
+
+    local_end = (
+        end.astimezone(tz)
+    )
+
+    weekday_text = WEEKDAY_NAMES[
+        local_start.weekday()
+    ]
+
+    start_text = local_start.strftime(
+        "%d.%m %H:%M"
+    )
+
+    end_text = local_end.strftime(
+        "%H:%M"
+    )
 
     return (
         f"{timezone_name(timezone)}: "
-        f"{WEEKDAY_NAMES[local_start.weekday()]}, "
-        f"{local_start.strftime('%d.%m %H:%M')}–"
-        f"{local_end.strftime('%H:%M')}"
+        f"{weekday_text}, "
+        f"{start_text}–{end_text}"
     )
 
 
-# =========================================================
-# КНОПКИ
-# =========================================================
+# -------------------- Кнопки --------------------
 
 def timezone_keyboard():
     return InlineKeyboardMarkup(
@@ -774,11 +664,15 @@ def timezone_keyboard():
             [
                 InlineKeyboardButton(
                     "🇷🇺 Москва",
-                    callback_data="timezone:moscow",
+                    callback_data=(
+                        "timezone:moscow"
+                    ),
                 ),
                 InlineKeyboardButton(
                     "🇨🇳 Пекин",
-                    callback_data="timezone:beijing",
+                    callback_data=(
+                        "timezone:beijing"
+                    ),
                 ),
             ]
         ]
@@ -786,22 +680,27 @@ def timezone_keyboard():
 
 
 def date_keyboard(timezone):
-    tz = timezone_object(timezone)
-
-    today = datetime.now(tz).date()
+    today = datetime.now(
+        timezone_object(timezone)
+    ).date()
 
     rows = []
 
     for i in range(7):
-
-        d = today + timedelta(days=i)
+        current_date = (
+            today
+            + timedelta(days=i)
+        )
 
         rows.append(
             [
                 InlineKeyboardButton(
-                    d.strftime("%d.%m"),
+                    current_date.strftime(
+                        "%d.%m"
+                    ),
                     callback_data=(
-                        f"task_date:{d.isoformat()}"
+                        "task_date:"
+                        + current_date.isoformat()
                     ),
                 )
             ]
@@ -811,7 +710,9 @@ def date_keyboard(timezone):
         [
             InlineKeyboardButton(
                 "📅 Другая дата",
-                callback_data="task_date:custom",
+                callback_data=(
+                    "task_date:custom"
+                ),
             )
         ]
     )
@@ -825,7 +726,9 @@ def date_keyboard(timezone):
         ]
     )
 
-    return InlineKeyboardMarkup(rows)
+    return InlineKeyboardMarkup(
+        rows
+    )
 
 
 def time_keyboard(prefix):
@@ -846,17 +749,24 @@ def time_keyboard(prefix):
         len(values),
         2,
     ):
-        rows.append(
-            [
+        current_row = []
+
+        for value in values[
+            i:i + 2
+        ]:
+            current_row.append(
                 InlineKeyboardButton(
                     value,
                     callback_data=(
-                        f"{prefix}_time:{value}"
+                        prefix
+                        + "_time:"
+                        + value
                     ),
                 )
-                for value
-                in values[i:i + 2]
-            ]
+            )
+
+        rows.append(
+            current_row
         )
 
     rows.append(
@@ -864,7 +774,8 @@ def time_keyboard(prefix):
             InlineKeyboardButton(
                 "🕐 Другое время",
                 callback_data=(
-                    f"{prefix}_time:custom"
+                    prefix
+                    + "_time:custom"
                 ),
             )
         ]
@@ -879,7 +790,9 @@ def time_keyboard(prefix):
         ]
     )
 
-    return InlineKeyboardMarkup(rows)
+    return InlineKeyboardMarkup(
+        rows
+    )
 
 
 def priority_keyboard():
@@ -888,19 +801,25 @@ def priority_keyboard():
             [
                 InlineKeyboardButton(
                     "🔴 Высокая",
-                    callback_data="priority:1",
+                    callback_data=(
+                        "priority:1"
+                    ),
                 )
             ],
             [
                 InlineKeyboardButton(
                     "🟡 Средняя",
-                    callback_data="priority:2",
+                    callback_data=(
+                        "priority:2"
+                    ),
                 )
             ],
             [
                 InlineKeyboardButton(
                     "🟢 Низкая",
-                    callback_data="priority:3",
+                    callback_data=(
+                        "priority:3"
+                    ),
                 )
             ],
             [
@@ -946,35 +865,49 @@ def weekday_keyboard():
             [
                 InlineKeyboardButton(
                     "Пн",
-                    callback_data="lesson_day:0",
+                    callback_data=(
+                        "lesson_day:0"
+                    ),
                 ),
                 InlineKeyboardButton(
                     "Вт",
-                    callback_data="lesson_day:1",
+                    callback_data=(
+                        "lesson_day:1"
+                    ),
                 ),
                 InlineKeyboardButton(
                     "Ср",
-                    callback_data="lesson_day:2",
+                    callback_data=(
+                        "lesson_day:2"
+                    ),
                 ),
             ],
             [
                 InlineKeyboardButton(
                     "Чт",
-                    callback_data="lesson_day:3",
+                    callback_data=(
+                        "lesson_day:3"
+                    ),
                 ),
                 InlineKeyboardButton(
                     "Пт",
-                    callback_data="lesson_day:4",
+                    callback_data=(
+                        "lesson_day:4"
+                    ),
                 ),
                 InlineKeyboardButton(
                     "Сб",
-                    callback_data="lesson_day:5",
+                    callback_data=(
+                        "lesson_day:5"
+                    ),
                 ),
             ],
             [
                 InlineKeyboardButton(
                     "Вс",
-                    callback_data="lesson_day:6",
+                    callback_data=(
+                        "lesson_day:6"
+                    ),
                 )
             ],
             [
@@ -987,9 +920,7 @@ def weekday_keyboard():
     )
 
 
-# =========================================================
-# /START
-# =========================================================
+# -------------------- Start --------------------
 
 async def start(
     update: Update,
@@ -997,45 +928,38 @@ async def start(
 ):
     context.user_data.clear()
 
-    user_id = update.effective_user.id
+    user_id = (
+        update.effective_user.id
+    )
 
     timezone = get_user_timezone(
         user_id
     )
 
-    logger.info(
-        "Команда /start от пользователя %s",
-        user_id,
-    )
-
-    # Новый пользователь сначала выбирает время
     if timezone is None:
-
         await update.message.reply_text(
-            "👋 Добро пожаловать в учебный "
-            "планировщик!\n\n"
-            "Сначала выбери, в каком часовом "
-            "поясе тебе удобнее работать:\n\n"
-            "🇷🇺 Москва — московское время\n"
-            "🇨🇳 Пекин — пекинское время",
-            reply_markup=timezone_keyboard(),
+            "👋 Добро пожаловать "
+            "в учебный планировщик!\n\n"
+            "Сначала выбери, "
+            "какое время тебе показывать:",
+            reply_markup=(
+                timezone_keyboard()
+            ),
         )
 
         return
 
+    timezone_text = (
+        timezone_name(timezone)
+    )
+
     await update.message.reply_text(
         "👋 Учебный планировщик\n\n"
         f"🕐 Выбранное время: "
-        f"{timezone_name(timezone)}\n\n"
-        "Все даты и время будут вводиться "
-        "и отображаться в этом часовом поясе.",
+        f"{timezone_text}",
         reply_markup=MAIN_MENU,
     )
 
-
-# =========================================================
-# НАСТРОЙКИ
-# =========================================================
 
 async def show_settings(
     update: Update,
@@ -1048,19 +972,20 @@ async def show_settings(
         or "moscow"
     )
 
+    timezone_text = (
+        timezone_name(timezone)
+    )
+
     await update.message.reply_text(
         "⚙️ Настройки\n\n"
         f"Сейчас выбрано: "
-        f"{timezone_name(timezone)}\n\n"
-        "Выбери другой часовой пояс, "
-        "если хочешь его изменить:",
-        reply_markup=timezone_keyboard(),
+        f"{timezone_text}\n\n"
+        "Выбери часовой пояс:",
+        reply_markup=(
+            timezone_keyboard()
+        ),
     )
 
-
-# =========================================================
-# ДОБАВЛЕНИЕ ЗАДАЧИ
-# =========================================================
 
 async def begin_task(
     update: Update,
@@ -1068,11 +993,13 @@ async def begin_task(
 ):
     context.user_data.clear()
 
-    context.user_data["flow"] = (
-        "task_name"
-    )
+    context.user_data[
+        "flow"
+    ] = "task_name"
 
-    context.user_data["temp"] = {}
+    context.user_data[
+        "temp"
+    ] = {}
 
     timezone = (
         get_user_timezone(
@@ -1081,17 +1008,18 @@ async def begin_task(
         or "moscow"
     )
 
-    await update.message.reply_text(
-        "Напиши название задачи:\n\n"
-        f"🕐 Время: "
-        f"{timezone_name(timezone)}",
-        reply_markup=ReplyKeyboardRemove(),
+    timezone_text = (
+        timezone_name(timezone)
     )
 
+    await update.message.reply_text(
+        "Напиши название задачи:\n\n"
+        f"🕐 Время: {timezone_text}",
+        reply_markup=(
+            ReplyKeyboardRemove()
+        ),
+    )
 
-# =========================================================
-# ДОБАВЛЕНИЕ ЗАНЯТИЯ
-# =========================================================
 
 async def begin_lesson(
     update: Update,
@@ -1099,11 +1027,13 @@ async def begin_lesson(
 ):
     context.user_data.clear()
 
-    context.user_data["flow"] = (
-        "lesson_name"
-    )
+    context.user_data[
+        "flow"
+    ] = "lesson_name"
 
-    context.user_data["temp"] = {}
+    context.user_data[
+        "temp"
+    ] = {}
 
     timezone = (
         get_user_timezone(
@@ -1112,17 +1042,20 @@ async def begin_lesson(
         or "moscow"
     )
 
+    timezone_text = (
+        timezone_name(timezone)
+    )
+
     await update.message.reply_text(
         "Напиши название предмета:\n\n"
-        f"🕐 Время занятия вводится по: "
-        f"{timezone_name(timezone)}",
-        reply_markup=ReplyKeyboardRemove(),
+        f"🕐 Время: {timezone_text}",
+        reply_markup=(
+            ReplyKeyboardRemove()
+        ),
     )
 
 
-# =========================================================
-# CALLBACK-КНОПКИ
-# =========================================================
+# -------------------- Callback --------------------
 
 async def callbacks(
     update: Update,
@@ -1135,12 +1068,9 @@ async def callbacks(
     data = q.data
 
 
-    # -----------------------------------------------------
-    # ВЫБОР ЧАСОВОГО ПОЯСА
-    # -----------------------------------------------------
-
-    if data.startswith("timezone:"):
-
+    if data.startswith(
+        "timezone:"
+    ):
         timezone = data.split(
             ":",
             1,
@@ -1153,24 +1083,22 @@ async def callbacks(
 
         context.user_data.clear()
 
+        timezone_text = (
+            timezone_name(
+                timezone
+            )
+        )
+
         await q.message.reply_text(
-            "✅ Настройки сохранены!\n\n"
-            f"Теперь используется: "
-            f"{timezone_name(timezone)}\n\n"
-            "Все задачи и расписание будут "
-            "показываться в выбранном времени.",
+            f"✅ Выбрано время: "
+            f"{timezone_text}",
             reply_markup=MAIN_MENU,
         )
 
         return
 
 
-    # -----------------------------------------------------
-    # ОТМЕНА
-    # -----------------------------------------------------
-
     if data == "cancel":
-
         context.user_data.clear()
 
         await q.message.reply_text(
@@ -1181,76 +1109,65 @@ async def callbacks(
         return
 
 
-    # -----------------------------------------------------
-    # ДАТА ЗАДАЧИ
-    # -----------------------------------------------------
-
     if data.startswith(
         "task_date:"
     ):
-
         value = data.split(
             ":",
             1,
         )[1]
 
         if value == "custom":
-
-            context.user_data["flow"] = (
-                "task_custom_date"
-            )
+            context.user_data[
+                "flow"
+            ] = "task_custom_date"
 
             await q.message.reply_text(
-                "Введи дату, например:\n"
-                "25.10\n"
-                "или\n"
-                "25.10.2026"
+                "Введи дату: "
+                "25.10 или 25.10.2026"
             )
 
             return
 
-        context.user_data["temp"][
-            "date"
-        ] = value
+        context.user_data[
+            "temp"
+        ]["date"] = value
 
         await q.message.reply_text(
             "Выбери время:",
             reply_markup=(
-                time_keyboard("task")
+                time_keyboard(
+                    "task"
+                )
             ),
         )
 
         return
 
 
-    # -----------------------------------------------------
-    # ВРЕМЯ ЗАДАЧИ
-    # -----------------------------------------------------
-
     if data.startswith(
         "task_time:"
     ):
-
         value = data.split(
             ":",
             1,
         )[1]
 
         if value == "custom":
-
-            context.user_data["flow"] = (
-                "task_custom_time"
-            )
+            context.user_data[
+                "flow"
+            ] = "task_custom_time"
 
             await q.message.reply_text(
-                "Введи время, например 17:30"
+                "Введи время, "
+                "например 17:30"
             )
 
             return
 
-        context.user_data["temp"][
-            "time"
-        ] = value
+        context.user_data[
+            "temp"
+        ]["time"] = value
 
         await q.message.reply_text(
             "Выбери важность:",
@@ -1262,14 +1179,9 @@ async def callbacks(
         return
 
 
-    # -----------------------------------------------------
-    # ПРИОРИТЕТ И СОХРАНЕНИЕ ЗАДАЧИ
-    # -----------------------------------------------------
-
     if data.startswith(
         "priority:"
     ):
-
         priority = int(
             data.split(
                 ":",
@@ -1277,9 +1189,11 @@ async def callbacks(
             )[1]
         )
 
-        temp = context.user_data[
-            "temp"
-        ]
+        temp = (
+            context.user_data[
+                "temp"
+            ]
+        )
 
         timezone = (
             get_user_timezone(
@@ -1293,33 +1207,37 @@ async def callbacks(
         )
 
         selected_date = (
-            datetime.fromisoformat(
+            datetime
+            .fromisoformat(
                 temp["date"]
-            ).date()
+            )
+            .date()
         )
 
-        # Пользователь вводит время
-        # в выбранном часовом поясе.
-        due_local = datetime.combine(
-            selected_date,
-            parse_time(temp["time"]),
-            tzinfo=tz,
+        selected_time = (
+            parse_time(
+                temp["time"]
+            )
+        )
+
+        due_local = (
+            datetime.combine(
+                selected_date,
+                selected_time,
+                tzinfo=tz,
+            )
         )
 
         if (
             due_local
             <= datetime.now(tz)
         ):
-
             await q.message.reply_text(
                 "❌ Это время уже прошло."
             )
 
             return
 
-        # В базу сохраняем в Москве,
-        # чтобы все данные имели
-        # единый формат.
         due_moscow = (
             due_local.astimezone(
                 MOSCOW
@@ -1327,7 +1245,6 @@ async def callbacks(
         )
 
         try:
-
             task_id = add_task(
                 q.from_user.id,
                 temp["text"],
@@ -1335,49 +1252,61 @@ async def callbacks(
                 priority,
             )
 
+            shown_time = (
+                display_datetime(
+                    due_moscow,
+                    timezone,
+                )
+            )
+
+            task_text = (
+                temp["text"]
+            )
+
+            priority_text = (
+                PRIORITY_NAMES[
+                    priority
+                ]
+            )
+
             context.user_data.clear()
 
             await q.message.reply_text(
                 "✅ Задача сохранена!\n\n"
                 f"#{task_id} "
-                f"{temp['text']}\n"
-                f"{PRIORITY_NAMES[priority]}"
-                "\n\n"
-                f"{display_datetime(
-                    due_moscow,
-                    timezone
-                )}",
+                f"{task_text}\n"
+                f"{priority_text}\n\n"
+                f"{shown_time}",
                 reply_markup=MAIN_MENU,
             )
 
         except sqlite3.Error:
-
             logger.exception(
-                "Ошибка сохранения задачи"
+                "Ошибка сохранения "
+                "задачи"
             )
 
             await q.message.reply_text(
-                "⚠️ Не удалось сохранить "
-                "задачу."
+                "⚠️ Не удалось "
+                "сохранить задачу."
             )
 
         return
 
 
-    # -----------------------------------------------------
-    # ТИП ЗАНЯТИЯ
-    # -----------------------------------------------------
-
     if data.startswith(
         "lesson_type:"
     ):
-
-        context.user_data["temp"][
-            "lesson_type"
-        ] = data.split(
+        lesson_type = data.split(
             ":",
             1,
         )[1]
+
+        context.user_data[
+            "temp"
+        ]["lesson_type"] = (
+            lesson_type
+        )
 
         await q.message.reply_text(
             "Выбери день недели:",
@@ -1389,21 +1318,20 @@ async def callbacks(
         return
 
 
-    # -----------------------------------------------------
-    # ДЕНЬ ЗАНЯТИЯ
-    # -----------------------------------------------------
-
     if data.startswith(
         "lesson_day:"
     ):
-
-        context.user_data["temp"][
-            "weekday"
-        ] = int(
+        weekday = int(
             data.split(
                 ":",
                 1,
             )[1]
+        )
+
+        context.user_data[
+            "temp"
+        ]["weekday"] = (
+            weekday
         )
 
         await q.message.reply_text(
@@ -1418,22 +1346,18 @@ async def callbacks(
         return
 
 
-    # -----------------------------------------------------
-    # НАЧАЛО ЗАНЯТИЯ
-    # -----------------------------------------------------
-
     if data.startswith(
         "lesson_start_time:"
     ):
-
         value = data.split(
             ":",
             1,
         )[1]
 
         if value == "custom":
-
-            context.user_data["flow"] = (
+            context.user_data[
+                "flow"
+            ] = (
                 "lesson_custom_start"
             )
 
@@ -1444,12 +1368,15 @@ async def callbacks(
 
             return
 
-        context.user_data["temp"][
-            "start_time"
-        ] = value
+        context.user_data[
+            "temp"
+        ]["start_time"] = (
+            value
+        )
 
         await q.message.reply_text(
-            "До скольки идёт занятие?",
+            "До скольки идёт "
+            "занятие?",
             reply_markup=(
                 time_keyboard(
                     "lesson_end"
@@ -1460,22 +1387,18 @@ async def callbacks(
         return
 
 
-    # -----------------------------------------------------
-    # КОНЕЦ ЗАНЯТИЯ
-    # -----------------------------------------------------
-
     if data.startswith(
         "lesson_end_time:"
     ):
-
         value = data.split(
             ":",
             1,
         )[1]
 
         if value == "custom":
-
-            context.user_data["flow"] = (
+            context.user_data[
+                "flow"
+            ] = (
                 "lesson_custom_end"
             )
 
@@ -1486,20 +1409,23 @@ async def callbacks(
 
             return
 
-        temp = context.user_data[
-            "temp"
-        ]
+        temp = (
+            context.user_data[
+                "temp"
+            ]
+        )
 
         if (
             parse_time(value)
             <= parse_time(
-                temp["start_time"]
+                temp[
+                    "start_time"
+                ]
             )
         ):
-
             await q.message.reply_text(
-                "❌ Окончание должно быть "
-                "позже начала."
+                "❌ Окончание должно "
+                "быть позже начала."
             )
 
             return
@@ -1523,7 +1449,6 @@ async def callbacks(
         )
 
         try:
-
             lesson_id = add_lesson(
                 q.from_user.id,
                 temp["name"],
@@ -1538,43 +1463,52 @@ async def callbacks(
                 lesson_id,
             )
 
+            shown_lesson = (
+                lesson_text(
+                    row,
+                    timezone,
+                )
+            )
+
+            lesson_name = (
+                row["name"]
+            )
+
+            lesson_type = (
+                LESSON_TYPES[
+                    row[
+                        "lesson_type"
+                    ]
+                ]
+            )
+
             context.user_data.clear()
 
             await q.message.reply_text(
                 "✅ Занятие сохранено!\n\n"
-                f"📚 {row['name']}\n"
-                f"{LESSON_TYPES[
-                    row['lesson_type']
-                ]}\n\n"
-                f"{lesson_text(
-                    row,
-                    timezone
-                )}",
+                f"📚 {lesson_name}\n"
+                f"{lesson_type}\n\n"
+                f"{shown_lesson}",
                 reply_markup=MAIN_MENU,
             )
 
         except sqlite3.Error:
-
             logger.exception(
-                "Ошибка сохранения занятия"
+                "Ошибка сохранения "
+                "занятия"
             )
 
             await q.message.reply_text(
-                "⚠️ Не удалось сохранить "
-                "занятие."
+                "⚠️ Не удалось "
+                "сохранить занятие."
             )
 
         return
 
 
-    # -----------------------------------------------------
-    # ВЫПОЛНЕНО
-    # -----------------------------------------------------
-
     if data.startswith(
         "done:"
     ):
-
         task_id = int(
             data.split(
                 ":",
@@ -1588,28 +1522,26 @@ async def callbacks(
         )
 
         if row:
-
             complete_task(
                 q.from_user.id,
                 task_id,
             )
 
+            task_text = (
+                row["text"]
+            )
+
             await q.edit_message_text(
                 "✅ Выполнено\n\n"
-                f"{row['text']}"
+                f"{task_text}"
             )
 
         return
 
 
-    # -----------------------------------------------------
-    # УДАЛЕНИЕ ЗАДАЧИ
-    # -----------------------------------------------------
-
     if data.startswith(
         "delete:"
     ):
-
         task_id = int(
             data.split(
                 ":",
@@ -1623,28 +1555,26 @@ async def callbacks(
         )
 
         if row:
-
             delete_task(
                 q.from_user.id,
                 task_id,
             )
 
+            task_text = (
+                row["text"]
+            )
+
             await q.edit_message_text(
                 "🗑 Задача удалена\n\n"
-                f"{row['text']}"
+                f"{task_text}"
             )
 
         return
 
 
-    # -----------------------------------------------------
-    # УДАЛЕНИЕ ЗАНЯТИЯ
-    # -----------------------------------------------------
-
     if data.startswith(
         "lesson_delete:"
     ):
-
         lesson_id = int(
             data.split(
                 ":",
@@ -1658,76 +1588,75 @@ async def callbacks(
         )
 
         if row:
-
             delete_lesson(
                 q.from_user.id,
                 lesson_id,
             )
 
+            lesson_name = (
+                row["name"]
+            )
+
             await q.edit_message_text(
                 "🗑 Занятие удалено\n\n"
-                f"{row['name']}"
+                f"{lesson_name}"
             )
 
         return
 
 
-# =========================================================
-# ОБРАБОТКА ТЕКСТА
-# =========================================================
+# -------------------- Text handler --------------------
 
 async def text_handler(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ):
-    text = update.message.text.strip()
+    text = (
+        update.message.text.strip()
+    )
 
     user_id = (
         update.effective_user.id
     )
 
     timezone = (
-        get_user_timezone(user_id)
+        get_user_timezone(
+            user_id
+        )
         or "moscow"
     )
 
-    flow = context.user_data.get(
-        "flow"
+    flow = (
+        context.user_data.get(
+            "flow"
+        )
     )
 
 
-    # -----------------------------------------------------
-    # НАЗВАНИЕ ЗАДАЧИ
-    # -----------------------------------------------------
-
     if flow == "task_name":
-
-        context.user_data["temp"][
-            "text"
-        ] = text
+        context.user_data[
+            "temp"
+        ]["text"] = text
 
         await update.message.reply_text(
             "Выбери дату:",
             reply_markup=(
-                date_keyboard(timezone)
+                date_keyboard(
+                    timezone
+                )
             ),
         )
 
         return
 
 
-    # -----------------------------------------------------
-    # НАЗВАНИЕ ПРЕДМЕТА
-    # -----------------------------------------------------
-
     if flow == "lesson_name":
-
-        context.user_data["temp"][
-            "name"
-        ] = text
+        context.user_data[
+            "temp"
+        ]["name"] = text
 
         await update.message.reply_text(
-            "Выбери тип занятия:",
+            "Выбери тип:",
             reply_markup=(
                 lesson_type_keyboard()
             ),
@@ -1736,64 +1665,58 @@ async def text_handler(
         return
 
 
-    # -----------------------------------------------------
-    # СВОЯ ДАТА
-    # -----------------------------------------------------
-
     if flow == "task_custom_date":
-
         selected_date = parse_date(
             text,
             timezone,
         )
 
         if not selected_date:
-
             await update.message.reply_text(
-                "❌ Неверная дата.\n\n"
-                "Пример: 25.10 "
-                "или 25.10.2026"
+                "❌ Неверная дата.\n"
+                "Пример: "
+                "25.10 или 25.10.2026"
             )
 
             return
 
-        context.user_data["temp"][
-            "date"
-        ] = selected_date.isoformat()
+        context.user_data[
+            "temp"
+        ]["date"] = (
+            selected_date.isoformat()
+        )
 
         await update.message.reply_text(
             "Выбери время:",
             reply_markup=(
-                time_keyboard("task")
+                time_keyboard(
+                    "task"
+                )
             ),
         )
 
         return
 
 
-    # -----------------------------------------------------
-    # СВОЁ ВРЕМЯ ЗАДАЧИ
-    # -----------------------------------------------------
-
     if flow == "task_custom_time":
-
-        selected_time = parse_time(
-            text
+        selected_time = (
+            parse_time(text)
         )
 
         if not selected_time:
-
             await update.message.reply_text(
-                "❌ Используй формат HH:MM.\n"
+                "❌ Формат HH:MM.\n"
                 "Например: 17:30"
             )
 
             return
 
-        context.user_data["temp"][
-            "time"
-        ] = selected_time.strftime(
-            "%H:%M"
+        context.user_data[
+            "temp"
+        ]["time"] = (
+            selected_time.strftime(
+                "%H:%M"
+            )
         )
 
         await update.message.reply_text(
@@ -1806,32 +1729,29 @@ async def text_handler(
         return
 
 
-    # -----------------------------------------------------
-    # СВОЁ НАЧАЛО ЗАНЯТИЯ
-    # -----------------------------------------------------
-
     if flow == "lesson_custom_start":
-
-        selected_time = parse_time(
-            text
+        selected_time = (
+            parse_time(text)
         )
 
         if not selected_time:
-
             await update.message.reply_text(
-                "❌ Используй формат HH:MM."
+                "❌ Формат HH:MM."
             )
 
             return
 
-        context.user_data["temp"][
-            "start_time"
-        ] = selected_time.strftime(
-            "%H:%M"
+        context.user_data[
+            "temp"
+        ]["start_time"] = (
+            selected_time.strftime(
+                "%H:%M"
+            )
         )
 
         await update.message.reply_text(
-            "До скольки идёт занятие?",
+            "До скольки идёт "
+            "занятие?",
             reply_markup=(
                 time_keyboard(
                     "lesson_end"
@@ -1842,36 +1762,33 @@ async def text_handler(
         return
 
 
-    # -----------------------------------------------------
-    # СВОЁ ОКОНЧАНИЕ ЗАНЯТИЯ
-    # -----------------------------------------------------
-
     if flow == "lesson_custom_end":
-
         end = parse_time(text)
 
         if not end:
-
             await update.message.reply_text(
-                "❌ Используй формат HH:MM."
+                "❌ Формат HH:MM."
             )
 
             return
 
-        temp = context.user_data[
-            "temp"
-        ]
+        temp = (
+            context.user_data[
+                "temp"
+            ]
+        )
 
         if (
             end
             <= parse_time(
-                temp["start_time"]
+                temp[
+                    "start_time"
+                ]
             )
         ):
-
             await update.message.reply_text(
-                "❌ Окончание должно быть "
-                "позже начала."
+                "❌ Окончание должно "
+                "быть позже начала."
             )
 
             return
@@ -1901,93 +1818,95 @@ async def text_handler(
             lesson_id,
         )
 
+        shown_lesson = (
+            lesson_text(
+                row,
+                timezone,
+            )
+        )
+
+        lesson_name = (
+            row["name"]
+        )
+
+        lesson_type = (
+            LESSON_TYPES[
+                row[
+                    "lesson_type"
+                ]
+            ]
+        )
+
         context.user_data.clear()
 
         await update.message.reply_text(
             "✅ Занятие сохранено!\n\n"
-            f"📚 {row['name']}\n"
-            f"{LESSON_TYPES[
-                row['lesson_type']
-            ]}\n\n"
-            f"{lesson_text(
-                row,
-                timezone
-            )}",
+            f"📚 {lesson_name}\n"
+            f"{lesson_type}\n\n"
+            f"{shown_lesson}",
             reply_markup=MAIN_MENU,
         )
 
         return
 
 
-    # -----------------------------------------------------
-    # ГЛАВНОЕ МЕНЮ
-    # -----------------------------------------------------
-
     if text == "➕ Добавить задачу":
-
         await begin_task(
             update,
             context,
         )
 
-
     elif text == "➕ Добавить занятие":
-
         await begin_lesson(
             update,
             context,
         )
 
-
     elif text == "📋 Все задачи":
-
-        await show_tasks(update)
-
+        await show_tasks(
+            update
+        )
 
     elif text == "📚 Расписание":
-
-        await show_schedule(update)
-
+        await show_schedule(
+            update
+        )
 
     elif text == "📅 Сегодня":
-
-        await show_today(update)
-
+        await show_today(
+            update
+        )
 
     elif text == "🗓 Неделя":
-
-        await show_week(update)
-
+        await show_week(
+            update
+        )
 
     elif text == "📊 Статистика":
-
-        await show_stats(update)
-
+        await show_stats(
+            update
+        )
 
     elif text == "🕘 История":
-
-        await show_history(update)
-
+        await show_history(
+            update
+        )
 
     elif text == "⚙️ Настройки":
-
         await show_settings(
             update,
             context,
         )
 
-
     else:
-
         await update.message.reply_text(
-            "Выбери действие кнопкой 👇",
+            "Выбери действие "
+            "кнопкой 👇",
             reply_markup=MAIN_MENU,
         )
 
 
-# =========================================================
-# ВСЕ ЗАДАЧИ
-# =========================================================
+# -------------------- Все задачи --------------------
 
 async def show_tasks(
     update: Update,
@@ -1997,14 +1916,17 @@ async def show_tasks(
     )
 
     timezone = (
-        get_user_timezone(user_id)
+        get_user_timezone(
+            user_id
+        )
         or "moscow"
     )
 
-    rows = active_tasks(user_id)
+    rows = active_tasks(
+        user_id
+    )
 
     if not rows:
-
         await update.message.reply_text(
             "📭 Активных задач нет.",
             reply_markup=MAIN_MENU,
@@ -2017,11 +1939,25 @@ async def show_tasks(
     )
 
     for row in rows:
-
         due = ensure_moscow(
             datetime.fromisoformat(
-                row["due_datetime"]
+                row[
+                    "due_datetime"
+                ]
             )
+        )
+
+        shown_time = (
+            display_datetime(
+                due,
+                timezone,
+            )
+        )
+
+        priority_text = (
+            PRIORITY_NAMES[
+                row["priority"]
+            ]
         )
 
         keyboard = InlineKeyboardMarkup(
@@ -2030,13 +1966,19 @@ async def show_tasks(
                     InlineKeyboardButton(
                         "✅ Выполнено",
                         callback_data=(
-                            f"done:{row['id']}"
+                            "done:"
+                            + str(
+                                row["id"]
+                            )
                         ),
                     ),
                     InlineKeyboardButton(
                         "🗑 Удалить",
                         callback_data=(
-                            f"delete:{row['id']}"
+                            "delete:"
+                            + str(
+                                row["id"]
+                            )
                         ),
                     ),
                 ]
@@ -2044,21 +1986,14 @@ async def show_tasks(
         )
 
         await update.message.reply_text(
-            f"{PRIORITY_NAMES[
-                row['priority']
-            ]}\n"
+            f"{priority_text}\n"
             f"📌 {row['text']}\n\n"
-            f"{display_datetime(
-                due,
-                timezone
-            )}",
+            f"{shown_time}",
             reply_markup=keyboard,
         )
 
 
-# =========================================================
-# РАСПИСАНИЕ
-# =========================================================
+# -------------------- Расписание --------------------
 
 async def show_schedule(
     update: Update,
@@ -2068,14 +2003,17 @@ async def show_schedule(
     )
 
     timezone = (
-        get_user_timezone(user_id)
+        get_user_timezone(
+            user_id
+        )
         or "moscow"
     )
 
-    rows = lessons(user_id)
+    rows = lessons(
+        user_id
+    )
 
     if not rows:
-
         await update.message.reply_text(
             "📚 Расписание пустое.",
             reply_markup=MAIN_MENU,
@@ -2083,21 +2021,37 @@ async def show_schedule(
 
         return
 
-    # Сортируем по ближайшему занятию
     rows = sorted(
         rows,
-        key=lambda row: (
-            next_lesson_start(row)
-        ),
+        key=next_lesson_start,
+    )
+
+    timezone_text = (
+        timezone_name(
+            timezone
+        )
     )
 
     await update.message.reply_text(
-        "📚 Расписание\n\n"
-        f"🕐 Время: "
-        f"{timezone_name(timezone)}"
+        "📚 Расписание\n"
+        f"🕐 {timezone_text}"
     )
 
     for row in rows:
+        shown_lesson = (
+            lesson_text(
+                row,
+                timezone,
+            )
+        )
+
+        lesson_type = (
+            LESSON_TYPES[
+                row[
+                    "lesson_type"
+                ]
+            ]
+        )
 
         keyboard = InlineKeyboardMarkup(
             [
@@ -2106,7 +2060,9 @@ async def show_schedule(
                         "🗑 Удалить занятие",
                         callback_data=(
                             "lesson_delete:"
-                            f"{row['id']}"
+                            + str(
+                                row["id"]
+                            )
                         ),
                     )
                 ]
@@ -2115,20 +2071,13 @@ async def show_schedule(
 
         await update.message.reply_text(
             f"📚 {row['name']}\n"
-            f"{LESSON_TYPES[
-                row['lesson_type']
-            ]}\n\n"
-            f"{lesson_text(
-                row,
-                timezone
-            )}",
+            f"{lesson_type}\n\n"
+            f"{shown_lesson}",
             reply_markup=keyboard,
         )
 
 
-# =========================================================
-# СЕГОДНЯ
-# =========================================================
+# -------------------- Сегодня --------------------
 
 async def show_today(
     update: Update,
@@ -2138,107 +2087,127 @@ async def show_today(
     )
 
     timezone = (
-        get_user_timezone(user_id)
+        get_user_timezone(
+            user_id
+        )
         or "moscow"
     )
 
-    tz = timezone_object(timezone)
+    tz = timezone_object(
+        timezone
+    )
 
-    today = datetime.now(tz).date()
+    today = datetime.now(
+        tz
+    ).date()
 
-
-    # ЗАДАЧИ
     task_rows = []
 
-    for row in active_tasks(user_id):
-
+    for row in active_tasks(
+        user_id
+    ):
         due = ensure_moscow(
             datetime.fromisoformat(
-                row["due_datetime"]
+                row[
+                    "due_datetime"
+                ]
             )
         )
 
-        local_due = (
-            due.astimezone(tz)
-        )
+        if (
+            due.astimezone(
+                tz
+            ).date()
+            == today
+        ):
+            task_rows.append(
+                row
+            )
 
-        if local_due.date() == today:
-            task_rows.append(row)
-
-
-    # ЗАНЯТИЯ
     lesson_rows = []
 
-    for row in lessons(user_id):
-
-        lesson_info = lesson_text(
+    for row in lessons(
+        user_id
+    ):
+        info = lesson_text(
             row,
             timezone,
             today,
         )
 
-        if lesson_info:
+        if info:
             lesson_rows.append(
                 (
                     row,
-                    lesson_info,
+                    info,
                 )
             )
 
+    timezone_text = (
+        timezone_name(
+            timezone
+        )
+    )
 
     text = (
         f"📅 Сегодня, "
         f"{today.strftime('%d.%m.%Y')}\n"
-        f"🕐 {timezone_name(timezone)}"
-        "\n\n"
+        f"🕐 {timezone_text}\n\n"
         "🎓 ЗАНЯТИЯ\n"
     )
 
-
     if lesson_rows:
-
         for row, info in lesson_rows:
+            lesson_type = (
+                LESSON_TYPES[
+                    row[
+                        "lesson_type"
+                    ]
+                ]
+            )
 
             text += (
                 f"\n{row['name']} — "
-                f"{LESSON_TYPES[
-                    row['lesson_type']
-                ]}\n"
+                f"{lesson_type}\n"
                 f"{info}\n"
             )
 
     else:
         text += "Нет занятий.\n"
 
-
     text += "\n📌 ЗАДАЧИ\n"
 
-
     if task_rows:
-
         for row in task_rows:
-
             due = ensure_moscow(
                 datetime.fromisoformat(
-                    row["due_datetime"]
+                    row[
+                        "due_datetime"
+                    ]
                 )
             )
 
-            text += (
-                f"\n"
-                f"{PRIORITY_NAMES[
-                    row['priority']
-                ]} "
-                f"{row['text']}\n"
-                f"{display_datetime(
+            shown_time = (
+                display_datetime(
                     due,
-                    timezone
-                )}\n"
+                    timezone,
+                )
+            )
+
+            priority_text = (
+                PRIORITY_NAMES[
+                    row["priority"]
+                ]
+            )
+
+            text += (
+                f"\n{priority_text} "
+                f"{row['text']}\n"
+                f"{shown_time}\n"
             )
 
     else:
         text += "Нет задач."
-
 
     await update.message.reply_text(
         text,
@@ -2246,9 +2215,7 @@ async def show_today(
     )
 
 
-# =========================================================
-# НЕДЕЛЯ
-# =========================================================
+# -------------------- Неделя --------------------
 
 async def show_week(
     update: Update,
@@ -2258,53 +2225,73 @@ async def show_week(
     )
 
     timezone = (
-        get_user_timezone(user_id)
+        get_user_timezone(
+            user_id
+        )
         or "moscow"
     )
 
-    tz = timezone_object(timezone)
+    tz = timezone_object(
+        timezone
+    )
 
-    start = datetime.now(tz).date()
+    start = datetime.now(
+        tz
+    ).date()
 
-    task_rows = active_tasks(user_id)
-    lesson_rows = lessons(user_id)
+    task_rows = active_tasks(
+        user_id
+    )
+
+    lesson_rows = lessons(
+        user_id
+    )
+
+    timezone_text = (
+        timezone_name(
+            timezone
+        )
+    )
 
     text = (
         "🗓 План на 7 дней\n"
-        f"🕐 {timezone_name(timezone)}\n"
+        f"🕐 {timezone_text}\n"
     )
 
     found = False
 
-
     for offset in range(7):
-
         day = (
             start
-            + timedelta(days=offset)
+            + timedelta(
+                days=offset
+            )
         )
 
         day_tasks = []
 
         for row in task_rows:
-
             due = ensure_moscow(
                 datetime.fromisoformat(
-                    row["due_datetime"]
+                    row[
+                        "due_datetime"
+                    ]
                 )
             )
 
             if (
-                due.astimezone(tz).date()
+                due.astimezone(
+                    tz
+                ).date()
                 == day
             ):
-                day_tasks.append(row)
-
+                day_tasks.append(
+                    row
+                )
 
         day_lessons = []
 
         for row in lesson_rows:
-
             info = lesson_text(
                 row,
                 timezone,
@@ -2319,63 +2306,76 @@ async def show_week(
                     )
                 )
 
-
         if (
             not day_tasks
             and not day_lessons
         ):
             continue
 
-
         found = True
 
-
-        text += (
-            f"\n📅 "
-            f"{WEEKDAY_NAMES[
+        weekday_text = (
+            WEEKDAY_NAMES[
                 day.weekday()
-            ]}, "
-            f"{day.strftime('%d.%m')}\n"
+            ]
         )
 
+        day_text = day.strftime(
+            "%d.%m"
+        )
+
+        text += (
+            f"\n📅 {weekday_text}, "
+            f"{day_text}\n"
+        )
 
         for row, info in day_lessons:
+            lesson_type = (
+                LESSON_TYPES[
+                    row[
+                        "lesson_type"
+                    ]
+                ]
+            )
 
             text += (
                 f"🎓 {row['name']} — "
-                f"{LESSON_TYPES[
-                    row['lesson_type']
-                ]}\n"
+                f"{lesson_type}\n"
                 f"{info}\n"
             )
 
-
         for row in day_tasks:
-
             due = ensure_moscow(
                 datetime.fromisoformat(
-                    row["due_datetime"]
+                    row[
+                        "due_datetime"
+                    ]
                 )
+            )
+
+            shown_time = (
+                display_datetime(
+                    due,
+                    timezone,
+                )
+            )
+
+            priority_text = (
+                PRIORITY_NAMES[
+                    row["priority"]
+                ]
             )
 
             text += (
                 f"📌 {row['text']} — "
-                f"{PRIORITY_NAMES[
-                    row['priority']
-                ]}\n"
-                f"{display_datetime(
-                    due,
-                    timezone
-                )}\n"
+                f"{priority_text}\n"
+                f"{shown_time}\n"
             )
 
-
     if not found:
-
         text += (
             "\nНичего не запланировано."
         )
-
 
     await update.message.reply_text(
         text,
@@ -2383,9 +2383,7 @@ async def show_week(
     )
 
 
-# =========================================================
-# СТАТИСТИКА
-# =========================================================
+# -------------------- Статистика --------------------
 
 async def show_stats(
     update: Update,
@@ -2407,18 +2405,19 @@ async def show_stats(
         f"Всего задач: {total}\n"
         f"✅ Выполнено: {completed}\n"
         f"⏳ Активных: {active}\n"
-        f"🔴 Высокий приоритет: {high}\n\n"
+        f"🔴 Высокий приоритет: "
+        f"{high}\n\n"
         f"🎓 Всего занятий: "
         f"{lesson_count}\n"
-        f"📖 Лекций: {lectures}\n"
-        f"✏️ Практик: {practices}",
+        f"📖 Лекций: "
+        f"{lectures}\n"
+        f"✏️ Практик: "
+        f"{practices}",
         reply_markup=MAIN_MENU,
     )
 
 
-# =========================================================
-# ИСТОРИЯ
-# =========================================================
+# -------------------- История --------------------
 
 async def show_history(
     update: Update,
@@ -2428,16 +2427,21 @@ async def show_history(
     )
 
     timezone = (
-        get_user_timezone(user_id)
+        get_user_timezone(
+            user_id
+        )
         or "moscow"
     )
 
-    tz = timezone_object(timezone)
+    tz = timezone_object(
+        timezone
+    )
 
-    rows = history(user_id)
+    rows = history(
+        user_id
+    )
 
     if not rows:
-
         await update.message.reply_text(
             "🕘 История пока пустая.",
             reply_markup=MAIN_MENU,
@@ -2445,32 +2449,36 @@ async def show_history(
 
         return
 
-
     text = (
         "🕘 Последние выполненные "
         "задачи\n"
     )
 
-
     for row in rows:
-
         completed = ensure_moscow(
             datetime.fromisoformat(
-                row["completed_at"]
+                row[
+                    "completed_at"
+                ]
             )
         )
 
         completed_local = (
-            completed.astimezone(tz)
+            completed.astimezone(
+                tz
+            )
+        )
+
+        completed_text = (
+            completed_local.strftime(
+                "%d.%m.%Y %H:%M"
+            )
         )
 
         text += (
             f"\n✅ {row['text']}\n"
-            f"{completed_local.strftime(
-                '%d.%m.%Y %H:%M'
-            )}\n"
+            f"{completed_text}\n"
         )
-
 
     await update.message.reply_text(
         text,
@@ -2478,9 +2486,7 @@ async def show_history(
     )
 
 
-# =========================================================
-# ОШИБКИ
-# =========================================================
+# -------------------- Ошибки --------------------
 
 async def error_handler(
     update,
@@ -2492,14 +2498,16 @@ async def error_handler(
     )
 
     if (
-        isinstance(update, Update)
+        isinstance(
+            update,
+            Update,
+        )
         and update.effective_message
     ):
-
         try:
-
             await (
-                update.effective_message
+                update
+                .effective_message
                 .reply_text(
                     "⚠️ Произошла ошибка. "
                     "Попробуй ещё раз."
@@ -2507,18 +2515,17 @@ async def error_handler(
             )
 
         except Exception:
-
             logger.exception(
                 "Не удалось отправить "
                 "сообщение об ошибке"
             )
 
 
-# =========================================================
-# ЗАПУСК БОТА
-# =========================================================
+# -------------------- Запуск --------------------
 
-async def post_init(application):
+async def post_init(
+    application,
+):
     init_db()
 
     await application.bot.set_my_commands(
@@ -2546,14 +2553,12 @@ application = (
     .build()
 )
 
-
 application.add_handler(
     CommandHandler(
         "start",
         start,
     )
 )
-
 
 application.add_handler(
     CommandHandler(
@@ -2562,13 +2567,11 @@ application.add_handler(
     )
 )
 
-
 application.add_handler(
     CallbackQueryHandler(
         callbacks
     )
 )
-
 
 application.add_handler(
     MessageHandler(
@@ -2578,14 +2581,12 @@ application.add_handler(
     )
 )
 
-
 application.add_error_handler(
     error_handler
 )
 
 
 if __name__ == "__main__":
-
     logger.info(
         "Запуск LAB 3..."
     )
