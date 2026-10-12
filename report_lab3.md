@@ -105,7 +105,7 @@
 
 
 <img width="1142" height="362" alt="Снимок экрана 2026-10-12 190309" src="https://github.com/user-attachments/assets/965f13c8-84bc-41da-a87b-ae91385106c2" />
-<img width="1018" height="274" alt="Снимок экрана 2026-10-12 190322" src="https://github.com/user-attachments/assets/1b101d3d-a55b-48b5-b638-b13a32a755f8" />
+<img width="1048" height="420" alt="Снимок экрана 2026-10-12 192346" src="https://github.com/user-attachments/assets/31c2aaf5-6a5c-404b-ad23-12105b9a7db0" />
 <img width="1076" height="632" alt="Снимок экрана 2026-10-12 190300" src="https://github.com/user-attachments/assets/b982ebb8-4e4f-4fc1-943e-7756939184e8" />
 
 
